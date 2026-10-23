@@ -46,6 +46,7 @@ class MonitorService : Service() {
     private var redeemer: AutoRedeemer? = null
     private var cpuLock: PowerManager.WakeLock? = null
     @Volatile private var lastWebSuccess = 0L
+    @Volatile private var lastApiStartedAt = 0L
     @Volatile private var blockedUntil = 0L
     private var blockedCount = 0
 
@@ -173,6 +174,11 @@ class MonitorService : Service() {
     @Synchronized
     private fun scheduleApi(delaySeconds: Long) {
         if (!alive.get() || scheduler.isShutdown) return
+        // A failed web load must NEVER cause the API to run more often than its user-set interval.
+        val minSpacing = Store.apiSeconds(this).toLong() * 1000L
+        val now = SystemClock.elapsedRealtime()
+        val untilAllowed = if (lastApiStartedAt > 0L) (lastApiStartedAt + minSpacing - now).coerceAtLeast(0L) else 0L
+        val delayMs = maxOf(delaySeconds.coerceAtLeast(0) * 1000L, untilAllowed)
         nextApi?.cancel(false)
         nextApi = scheduler.schedule({
             try {
@@ -185,6 +191,7 @@ class MonitorService : Service() {
                         now - lastWebSuccess < (Store.seconds(this).toLong() * 3L + 15000L)
                     if (manual || !recentWeb) {
                         Store.status(this, "备用 API 正在检查 UID ${Store.uid(this)}")
+                        lastApiStartedAt = SystemClock.elapsedRealtime()
                         val scan = BiliScanner(this).scan(Store.uid(this))
                         clearBlockCount()
                         Store.monitorResult(this, "备用 API", scan.latestId, scan.latestTime, scan.cardCount, scan.gifts.size)
@@ -202,7 +209,7 @@ class MonitorService : Service() {
                     scheduleApi(maxOf(Store.apiSeconds(this).toLong(), remaining + if (remaining > 0L) 1L else 0L))
                 }
             }
-        }, delaySeconds.coerceAtLeast(0), TimeUnit.SECONDS)
+        }, delayMs, TimeUnit.MILLISECONDS)
     }
 
     private fun handleGifts(gifts: List<BiliScanner.Gift>): Int {
