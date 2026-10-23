@@ -56,13 +56,12 @@ class MonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         channels()
-        redeemer = AutoRedeemer(this) { url, result ->
+        redeemer = AutoRedeemer(this, { url, result ->
             Store.status(this, "领取结果：$result")
             Store.event(this, "科雷领奖结果：${result.take(110)}")
-            // All terminal outcomes need a visible notification, including failures.
             giftNotification(url, result)
             releaseClaimWake()
-        }
+        }, { acquireClaimWake() })
         webScanner = BiliWebScanner(this) { scan, ready, blocked, info ->
             if (!alive.get()) return@BiliWebScanner
             if (blocked) {
@@ -124,7 +123,10 @@ class MonitorService : Service() {
             if (Store.autoClaim(this)) {
                 val old = Store.pendingClaims(this)
                 if (old.isNotEmpty()) Store.event(this, "恢复 ${old.size} 条尚未提交领取的任务")
-                old.forEach { url -> main.post { acquireClaimWake(); redeemer?.enqueue(url) } }
+                if (old.isNotEmpty()) main.post {
+                    acquireClaimWake()
+                    redeemer?.enqueueAll(old)
+                }
             }
             scheduleWeb(0)
             scheduleApi(Store.apiSeconds(this).toLong())
@@ -238,19 +240,25 @@ class MonitorService : Service() {
     }
 
     private fun handleGifts(gifts: List<BiliScanner.Gift>): Int {
-        var count = 0
+        val newlyDiscovered = ArrayList<String>()
+        // Each unique Klei URL in the SAME dynamic receives an individual job.
+        // Do not start job #1 before the remaining links have been queued.
         for (gift in gifts) {
             if (Store.addNew(this, gift.url, gift.source)) {
-                count++
+                newlyDiscovered.add(gift.url)
                 giftNotification(gift.url, "发现新的科雷礼物链接")
-                if (Store.autoClaim(this)) main.post {
-                    acquireClaimWake()
-                    redeemer?.enqueue(gift.url)
-                }
-                else Store.update(this, gift.url, "已发现，等待手动领取")
+                if (!Store.autoClaim(this))
+                    Store.update(this, gift.url, "已发现，等待手动领取")
             }
         }
-        return count
+        if (newlyDiscovered.isNotEmpty()) {
+            Store.event(this, "本次发现 ${newlyDiscovered.size} 个不同的科雷链接，逐个排队领取")
+            if (Store.autoClaim(this)) main.post {
+                acquireClaimWake()
+                redeemer?.enqueueAll(newlyDiscovered)
+            }
+        }
+        return newlyDiscovered.size
     }
 
     @Synchronized

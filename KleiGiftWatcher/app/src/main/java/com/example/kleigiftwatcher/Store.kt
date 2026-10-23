@@ -151,7 +151,7 @@ object Store {
             if (state == "pending" || state == "loading") {
                 verifiedUrl(row.optString("url"))?.let { result.add(it) }
             }
-            if (result.size >= 8) break
+            if (result.size >= 150) break
         }
         result
     }
