@@ -229,7 +229,7 @@ class MainActivity : Activity() {
             container.addView(label("● $status", 14f, Color.rgb(27, 85, 137)))
             container.addView(label(url, 12f, Color.DKGRAY))
             container.addView(label("来自：${row.optString("source")}", 11f, Color.GRAY))
-            row(container, "查看 / 手动领取" to { openBrowser("klei", url) }, "重新尝试" to {
+            row(container, "查看 / 浏览器补领" to { openBrowser("klei", url) }, "重新尝试" to {
                 if (Store.verifiedUrl(url) != null) {
                     try {
                         startForegroundService(Intent(this, MonitorService::class.java)

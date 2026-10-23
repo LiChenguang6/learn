@@ -11,6 +11,9 @@ import org.json.JSONTokener
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
+import androidx.browser.customtabs.CustomTabsIntent
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -27,6 +30,7 @@ class BrowserActivity : Activity() {
     private lateinit var web: WebView
     private lateinit var status: TextView
     private var debugging = false
+    private var intendedKleiUrl: String = "https://accounts.klei.com/"
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,6 +44,7 @@ class BrowserActivity : Activity() {
         }
         val requested = intent.getStringExtra(EXTRA_URL)
         val url = if (site == "klei") Store.verifiedUrl(requested ?: "") ?: initial else initial
+        if (site == "klei") intendedKleiUrl = url
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -60,6 +65,19 @@ class BrowserActivity : Activity() {
         nav.addView(reload, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         nav.addView(home, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(nav)
+        if (site == "klei") {
+            val chrome = Button(this).apply {
+                text = "使用 Chrome 打开科雷页面（人工补领）"
+                setOnClickListener { openInChrome() }
+            }
+            root.addView(chrome)
+            val hint = TextView(this).apply {
+                text = "Chrome 与 App WebView 登录状态不共享。使用 Chrome 手动领取时可能需要重新登录；不会因此让后台自动领取使用 Chrome Cookie。"
+                textSize = 12f
+                setTextColor(Color.DKGRAY)
+            }
+            root.addView(hint)
+        }
         if (debugging) {
             val check = Button(this).apply {
                 text = "检测当前可见网页的动态卡片"
@@ -75,8 +93,22 @@ class BrowserActivity : Activity() {
         if (debugging) web.settings.userAgentString = BiliWebScanner.DESKTOP_UA
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
-        web.webChromeClient = WebChromeClient()
+        web.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                if (site == "klei" && newProgress in 1..95) status.text = "科雷网页加载中：$newProgress%"
+            }
+        }
         web.webViewClient = object : WebViewClient() {
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (site == "klei" && request.isForMainFrame) {
+                    status.text = "科雷页面无法加载：${error.description.toString().take(90)}。可点刷新重试，或使用 Chrome 手动补领。"
+                }
+            }
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                if (site == "klei" && request.isForMainFrame && response.statusCode >= 400) {
+                    status.text = "科雷网页 HTTP ${response.statusCode}；可点刷新重试或用 Chrome 打开。"
+                }
+            }
             override fun onPageFinished(view: WebView, current: String) {
                 if (debugging) {
                     status.text = "页面已加载，正在检查动态卡片：$current"
@@ -97,6 +129,23 @@ class BrowserActivity : Activity() {
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
         web.loadUrl(url)
+    }
+
+    private fun openInChrome() {
+        // Only allow the official Klei origin or a previously verified creator link.
+        val target = Store.verifiedUrl(intendedKleiUrl) ?: "https://accounts.klei.com/"
+        val uri = Uri.parse(target)
+        try {
+            val tab = CustomTabsIntent.Builder().setShowTitle(true).build()
+            tab.intent.setPackage("com.android.chrome")
+            tab.launchUrl(this, uri)
+        } catch (_: Exception) {
+            try { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(this, uri) }
+            catch (_: Exception) {
+                try { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                catch (e: Exception) { status.text = "无法打开浏览器：${e.message}" }
+            }
+        }
     }
 
     private fun inspectPage() {

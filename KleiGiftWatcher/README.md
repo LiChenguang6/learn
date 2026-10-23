@@ -90,3 +90,14 @@ app/src/main/java/com/example/kleigiftwatcher/
 - WebView 背景加载是 Android 的实验性路径，不保证锁屏时像可见浏览器一样渲染；遇到失败会回退 API。
 - **备用 API 的请求频率现有硬性下限**：连续网页失败不会把设置的 30～90 秒 API 间隔缩短成网页检测间隔。
 - HTTP 412 / API -352 仍会暂停轮询，不会采用代理、风控绕过或高频重试。
+
+
+## v0.3.2 Klei 网页稳定性与 Chrome 浏览器补领
+
+- Android WebView 本身使用 Chromium 渲染，不需要额外安装/打包一套 Chrome 内核。
+- 科雷可见登录/领取页面增加「使用 Chrome 打开科雷页面（人工补领）」按钮，优先使用已安装的 Chrome Custom Tab，并在不可用时使用默认浏览器。
+- **浏览器登录与 App WebView Cookie 不共享**。如果希望继续在后台尝试自动领取，仍需要在 App 内 WebView 登录一次科雷；仅通过 Chrome 登录并不能让隐藏 WebView 自动登录。
+- 后台自动领取复用 WebView 实例，减少频繁创建销毁；对页面导航网络错误 / HTTP 5xx 在未点击领取按钮前最多重试 **1 次**，保留失败原因供查看。
+- 一旦自动操作点击领取按钮，**不会自动重试网页提交或再次点击领取按钮**，避免重复操作；结果不能验证时提示人工核查。
+- Klei HTTP 403/429 不重试，不以频繁刷新方式试图绕过服务器限制。
+- Chrome Custom Tabs 是人工补领回退途径，不能用于锁屏后台 JavaScript 自动点击；Klei 自动领奖仍为实验性功能。
