@@ -15,15 +15,17 @@ object Store {
     private const val LIMIT = 150
 
     fun uid(ctx: Context): String = ctx.getSharedPreferences(NAME, 0).getString("uid", "12875864") ?: "12875864"
-    fun seconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("seconds", 60).coerceIn(30, 3600)
+    fun seconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("web_seconds", 15).coerceIn(10, 3600)
+    fun apiSeconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("api_seconds", 60).coerceIn(30, 90)
     fun autoClaim(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("auto_claim", true)
     fun active(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("active", false)
     fun lastStatus(ctx: Context): String = ctx.getSharedPreferences(NAME, 0).getString("status", "尚未检查") ?: "尚未检查"
 
-    fun configure(ctx: Context, uid: String, seconds: Int, auto: Boolean) {
+    fun configure(ctx: Context, uid: String, webSeconds: Int, apiSeconds: Int, auto: Boolean) {
         ctx.getSharedPreferences(NAME, 0).edit()
             .putString("uid", uid)
-            .putInt("seconds", seconds.coerceIn(30, 3600))
+            .putInt("web_seconds", webSeconds.coerceIn(10, 3600))
+            .putInt("api_seconds", apiSeconds.coerceIn(30, 90))
             .putBoolean("auto_claim", auto)
             .apply()
     }
