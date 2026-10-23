@@ -154,7 +154,7 @@ class BiliWebScanner(
                     .slice(0, 40).map(function(a) { return a.href; }).join(' ');
                 return {
                     source: a ? a.href : location.href,
-                    id: (a ? ((a.href.match(/\\/opus\\/(\\d+)/)||[])[1] || '') : '') || el.getAttribute('data-dynamic-id') || '',
+                    id: (a ? ((a.href.match(/\/opus\/(\d+)/)||[])[1] || '') : '') || el.getAttribute('data-dynamic-id') || '',
                     time: (el.querySelector('.bili-dyn-time, .bili-dyn-item__header__time, [class*="pub-time"]') || {}).innerText || '',
                     content: (el.innerText || '').slice(0, 18000) + ' ' +
                         links + ' ' + (el.innerHTML || '').slice(0, 30000)

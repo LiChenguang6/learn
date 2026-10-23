@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
@@ -43,6 +44,7 @@ class MonitorService : Service() {
     private var webTick: Runnable? = null
     private var webScanner: BiliWebScanner? = null
     private var redeemer: AutoRedeemer? = null
+    private var cpuLock: PowerManager.WakeLock? = null
     @Volatile private var lastWebSuccess = 0L
     @Volatile private var blockedUntil = 0L
     private var blockedCount = 0
@@ -58,18 +60,20 @@ class MonitorService : Service() {
             if (result.contains("需要") || result.contains("未核实") ||
                 result.contains("请手动") || result.contains("已领取")) giftNotification(url, result)
         }
-        webScanner = BiliWebScanner(this) { gifts, ready, blocked, info ->
+        webScanner = BiliWebScanner(this) { scan, ready, blocked, info ->
             if (!alive.get()) return@BiliWebScanner
             if (blocked) {
                 lastWebSuccess = 0L
                 registerBlock(info)
-            } else if (ready) {
+            } else if (ready && scan != null) {
                 lastWebSuccess = SystemClock.elapsedRealtime()
                 clearBlockCount()
-                val newCount = handleGifts(gifts)
-                Store.status(this, "网页：$info，发现 ${gifts.size} 个链接，新增 $newCount")
+                Store.monitorResult(this, "网页", scan.latestId, scan.latestTime, scan.cardCount, scan.gifts.size)
+                val newCount = handleGifts(scan.gifts)
+                Store.status(this, "网页：$info，发现 ${scan.gifts.size} 个链接，新增 $newCount")
             } else {
                 lastWebSuccess = 0L
+                Store.monitorError(this, "网页", info)
                 Store.status(this, "网页：$info")
                 // Fallback is only useful when the web view fails or has no readable cards.
                 requestApiNow()
@@ -80,6 +84,7 @@ class MonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) {
             alive.set(false)
+            Store.setDesired(this, false)
             Store.setActive(this, false)
             stopSelf()
             return START_NOT_STICKY
@@ -105,7 +110,10 @@ class MonitorService : Service() {
             }
         }
         val alreadyRunning = alive.getAndSet(true)
+        Store.setDesired(this, true)
         Store.setActive(this, true)
+        applyWakeMode()
+        if (!alreadyRunning) Store.event(this, "前台监控服务已启动（含系统恢复启动）")
         if (!alreadyRunning) {
             scheduleWeb(0)
             scheduleApi(Store.apiSeconds(this).toLong())
@@ -115,6 +123,25 @@ class MonitorService : Service() {
             requestApiNow()
         }
         return START_STICKY
+    }
+
+    /** Optional high-power mode requested by the user. Keeps CPU awake with screen OFF. */
+    private fun applyWakeMode() {
+        if (Store.keepAwake(this)) {
+            try {
+                if (cpuLock == null) cpuLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KleiWatcher:LockscreenMonitor")
+                    .apply { setReferenceCounted(false) }
+                if (cpuLock?.isHeld != true) cpuLock?.acquire()
+                Store.event(this, "锁屏增强已启用（高耗电；不保证系统放行网络）")
+            } catch (e: Exception) { Store.monitorError(this, "CPU 唤醒", e.message ?: "权限不可用") }
+        } else {
+            releaseWakeMode()
+        }
+    }
+
+    private fun releaseWakeMode() {
+        try { if (cpuLock?.isHeld == true) cpuLock?.release() } catch (_: Exception) {}
     }
 
     private fun scheduleWeb(delayMs: Long) {
@@ -158,16 +185,17 @@ class MonitorService : Service() {
                         now - lastWebSuccess < (Store.seconds(this).toLong() * 3L + 15000L)
                     if (manual || !recentWeb) {
                         Store.status(this, "备用 API 正在检查 UID ${Store.uid(this)}")
-                        val gifts = BiliScanner(this).scan(Store.uid(this))
+                        val scan = BiliScanner(this).scan(Store.uid(this))
                         clearBlockCount()
-                        val newCount = handleGifts(gifts)
-                        Store.status(this, "备用 API：发现 ${gifts.size} 个链接，新增 $newCount")
+                        Store.monitorResult(this, "备用 API", scan.latestId, scan.latestTime, scan.cardCount, scan.gifts.size)
+                        val newCount = handleGifts(scan.gifts)
+                        Store.status(this, "备用 API：发现 ${scan.gifts.size} 个链接，新增 $newCount")
                     }
                 }
             } catch (e: Exception) {
                 val reason = (e.message ?: e.javaClass.simpleName).take(150)
                 if (reason.contains("HTTP 412") || reason.contains("API -352")) registerBlock(reason)
-                else Store.status(this, "备用 API 失败：$reason")
+                else { Store.monitorError(this, "备用 API", reason); Store.status(this, "备用 API 失败：$reason") }
             } finally {
                 if (alive.get() && !scheduler.isShutdown) {
                     val remaining = ((blockedUntil - SystemClock.elapsedRealtime()) / 1000L).coerceAtLeast(0L)
@@ -195,6 +223,7 @@ class MonitorService : Service() {
         blockedCount = (blockedCount + 1).coerceAtMost(3)
         val cooldown = when (blockedCount) { 1 -> 120L; 2 -> 300L; else -> 900L }
         blockedUntil = maxOf(blockedUntil, SystemClock.elapsedRealtime() + cooldown * 1000L)
+        Store.monitorError(this, "HTTP 412 / 限制访问", "$reason；冷却 $cooldown 秒")
         Store.status(this, "B站访问受限（$reason），暂停请求 $cooldown 秒")
     }
 
@@ -236,10 +265,13 @@ class MonitorService : Service() {
         webTick?.let { main.removeCallbacks(it) }
         webScanner?.destroy()
         webScanner = null
+        releaseWakeMode()
+        cpuLock = null
         main.removeCallbacksAndMessages(null)
         redeemer?.destroy()
         redeemer = null
         Store.setActive(this, false)
+        Store.event(this, "监控服务退出；系统允许时可被重启")
         super.onDestroy()
     }
 }

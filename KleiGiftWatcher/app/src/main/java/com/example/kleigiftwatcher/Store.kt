@@ -20,6 +20,10 @@ object Store {
     fun autoClaim(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("auto_claim", true)
     fun keepAwake(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("keep_awake", false)
     fun resumeOnBoot(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("resume_boot", true)
+    fun desired(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("desired", false)
+    fun setDesired(ctx: Context, enabled: Boolean) {
+        ctx.getSharedPreferences(NAME, 0).edit().putBoolean("desired", enabled).commit()
+    }
     fun active(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("active", false)
     fun lastStatus(ctx: Context): String = ctx.getSharedPreferences(NAME, 0).getString("status", "尚未检查") ?: "尚未检查"
 
@@ -58,7 +62,7 @@ object Store {
 
     fun monitorResult(ctx: Context, method: String, latestId: String, pubTime: String, cards: Int, gifts: Int) {
         val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-        val info = "最近成功检测：$stamp\\n通道：$method · 动态数：$cards · 礼物链接：$gifts\\n最新动态 ID：${latestId.ifBlank { "无法解析" }}\\n发布时间：${pubTime.ifBlank { "无法解析" }}"
+        val info = "最近成功检测：$stamp\n通道：$method · 动态数：$cards · 礼物链接：$gifts\n最新动态 ID：${latestId.ifBlank { "无法解析" }}\n发布时间：${pubTime.ifBlank { "无法解析" }}"
         ctx.getSharedPreferences(NAME, 0).edit().putString("latest_info", info)
             .putString("diagnostic", "正常 · $method · $stamp").apply()
         event(ctx, "$method 成功：动态 $cards 条 / 礼物 $gifts 条，最新 ID ${latestId.ifBlank { "未知" }}")
