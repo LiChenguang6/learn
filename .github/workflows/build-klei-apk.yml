@@ -30,10 +30,51 @@ jobs:
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
       - name: Assemble debug APK
         run: gradle --no-daemon -p KleiGiftWatcher :app:assembleDebug
-      - name: Upload APK
-        if: always()
+      # Keep the private key OUT of the public repository and CI artifacts.
+      # If these four repository secrets are configured, sign with the stable key.
+      - name: Sign with stable private key (only when secrets are configured)
+        env:
+          SIGNING_KEYSTORE_B64: ${{ secrets.KLEI_KEYSTORE_B64 }}
+          SIGNING_PASSWORD: ${{ secrets.KLEI_KEYSTORE_PASSWORD }}
+          SIGNING_ALIAS: ${{ secrets.KLEI_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.KLEI_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -n "$SIGNING_KEYSTORE_B64" ] && [ -n "$SIGNING_PASSWORD" ] && [ -n "$SIGNING_ALIAS" ] && [ -n "$SIGNING_KEY_PASSWORD" ]; then
+            umask 077
+            KEYSTORE="$RUNNER_TEMP/klei_signing.p12"
+            printf '%s' "$SIGNING_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
+            export SIGNING_PASSWORD SIGNING_KEY_PASSWORD
+            SIGNER="${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/35.0.0/apksigner"
+            "$SIGNER" sign --ks "$KEYSTORE" --ks-type PKCS12 --ks-key-alias "$SIGNING_ALIAS" \
+              --ks-pass env:SIGNING_PASSWORD --key-pass env:SIGNING_KEY_PASSWORD \
+              --out KleiGiftWatcher/app/build/outputs/apk/debug/KleiGiftWatcher-fixed.apk \
+              KleiGiftWatcher/app/build/outputs/apk/debug/app-debug.apk
+            "$SIGNER" verify --verbose --print-certs KleiGiftWatcher/app/build/outputs/apk/debug/KleiGiftWatcher-fixed.apk
+            rm -f "$KEYSTORE"
+          else
+            echo "Signing secrets are not configured; exporting the debug APK and signing utility instead."
+          fi
+      - name: Upload fixed-signature APK if available
+        uses: actions/upload-artifact@v4
+        with:
+          name: KleiGiftWatcher-fixedsigned-apk
+          path: KleiGiftWatcher/app/build/outputs/apk/debug/KleiGiftWatcher-fixed.apk
+          if-no-files-found: ignore
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: KleiGiftWatcher-debug-apk
           path: KleiGiftWatcher/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: warn
+      - name: Export public Android signing tool (no keys)
+        run: |
+          mkdir -p signing-tools
+          cp "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/35.0.0/lib/apksigner.jar" signing-tools/apksigner.jar
+          java -jar signing-tools/apksigner.jar version
+      - name: Upload Android signer utility
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-apksigner-jar
+          path: signing-tools/apksigner.jar
+          if-no-files-found: error
