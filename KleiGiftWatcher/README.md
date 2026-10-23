@@ -139,3 +139,11 @@ app/src/main/java/com/example/kleigiftwatcher/
 - 识别回归测试：`node --test KleiGiftWatcher/tests/claim-page.test.cjs`（仓库根目录）。测试模拟 DOM 状态，不代表实测科雷账号领取成功。
 - 构建：Java 17+、Gradle 8.9、Android SDK 35/build-tools 35.0.0；仓库根目录执行 `gradle --no-daemon -p KleiGiftWatcher :app:assembleDebug :app:lintDebug`。
 - GitHub 工作流在 `klei-gift-watcher-diagnostics-v0.4.2` 分支推送时构建，沿用四个 `KLEI_*` Actions Secrets。覆盖旧版本请选择 `KleiGiftWatcher-fixedsigned-apk`；普通 debug APK 的签名可能与旧安装不同，不要为安装它先卸载旧版，以免丢失登录与记录。
+
+
+## v0.4.3 · 一秒网页检测
+
+- 按要求把动态网页检测默认值和可设置下限改为 1 秒，界面与输入校验同步允许 1～3600 秒。
+- 覆盖安装后首次读取设置时将旧的检测间隔迁移为 1 秒，仅执行一次；之后手动保存的间隔会保留。
+- 一秒是网页检测调度间隔；已有导航未结束时不会启动重叠加载或中断当前页面，实际检测速度仍受网络和页面渲染影响。
+- 备用 API 仍为 30～90 秒，HTTP 412/429 等既有访问限制与冷却处理保留。此设置不保证抢到礼物，可能增加耗电与限流概率。

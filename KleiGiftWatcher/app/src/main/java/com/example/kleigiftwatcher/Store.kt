@@ -15,7 +15,14 @@ object Store {
     private const val LIMIT = 150
 
     fun uid(ctx: Context): String = ctx.getSharedPreferences(NAME, 0).getString("uid", "12875864") ?: "12875864"
-    fun seconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("web_seconds", 15).coerceIn(10, 3600)
+    fun seconds(ctx: Context): Int = synchronized(lock) {
+        val prefs = ctx.getSharedPreferences(NAME, 0)
+        // Apply the requested one-second setting once, including existing installs.
+        if (!prefs.getBoolean("one_second_interval_migrated", false)) {
+            prefs.edit().putInt("web_seconds", 1).putBoolean("one_second_interval_migrated", true).commit()
+        }
+        prefs.getInt("web_seconds", 1).coerceIn(1, 3600)
+    }
     fun apiSeconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("api_seconds", 60).coerceIn(30, 90)
     fun autoClaim(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("auto_claim", true)
     fun keepAwake(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("keep_awake", false)
@@ -30,7 +37,8 @@ object Store {
     fun configure(ctx: Context, uid: String, webSeconds: Int, apiSeconds: Int, auto: Boolean, keepAwake: Boolean, boot: Boolean) {
         ctx.getSharedPreferences(NAME, 0).edit()
             .putString("uid", uid)
-            .putInt("web_seconds", webSeconds.coerceIn(10, 3600))
+            .putInt("web_seconds", webSeconds.coerceIn(1, 3600))
+            .putBoolean("one_second_interval_migrated", true)
             .putInt("api_seconds", apiSeconds.coerceIn(30, 90))
             .putBoolean("auto_claim", auto)
             .putBoolean("keep_awake", keepAwake)

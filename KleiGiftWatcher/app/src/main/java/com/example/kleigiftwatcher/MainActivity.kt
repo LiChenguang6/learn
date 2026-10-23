@@ -65,14 +65,15 @@ class MainActivity : Activity() {
             hint = "12875864"
         }
         column.addView(uid)
-        column.addView(label("网页刷新间隔（秒，最低 10 秒；建议 15 秒）", 14f))
+        column.addView(label("网页检测间隔（秒，最低 1 秒；默认 1 秒）", 14f))
         seconds = EditText(this).apply {
             setText(Store.seconds(this@MainActivity).toString())
             inputType = InputType.TYPE_CLASS_NUMBER
             setSingleLine(true)
-            hint = "15"
+            hint = "1"
         }
         column.addView(seconds)
+        column.addView(label("1 秒模式更耗电；加载期间不重复刷新，实际周期取决于网速。遇到限流仍会冷却。", 12f, Color.DKGRAY))
         column.addView(label("备用 API 检查间隔（秒，30～90 秒）", 14f))
         apiSeconds = EditText(this).apply {
             setText(Store.apiSeconds(this@MainActivity).toString())
@@ -179,8 +180,8 @@ class MainActivity : Activity() {
             return false
         }
         val entered = seconds.text.toString().toIntOrNull()
-        if (entered == null || entered !in 10..3600) {
-            toast("网页刷新间隔请输入 10～3600 秒")
+        if (entered == null || entered !in 1..3600) {
+            toast("网页检测间隔请输入 1～3600 秒")
             return false
         }
         val apiEntered = apiSeconds.text.toString().toIntOrNull()
