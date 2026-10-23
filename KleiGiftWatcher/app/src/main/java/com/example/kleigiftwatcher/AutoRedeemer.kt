@@ -36,10 +36,31 @@ class AutoRedeemer(
     private var current: String? = null
     private var jobId = 0
     private var loadId = 0
+    private var pageId = 0
     private var finished = true
     private var clicked = false
     private var polls = 0
     private var startedAt = 0L
+    private var loginPolls = 0
+    private var lastPageState = ""
+    private var loginSince = 0L
+    private var loginPage = ""
+    private val pageScript by lazy { context.assets.open("claim-page.js").bufferedReader().use { it.readText() } }
+    private fun script(click: Boolean = false): String {
+        val expected = org.json.JSONObject.quote(Uri.parse(current.orEmpty()).encodedPath.orEmpty())
+        return "window.__kleiDoClick = $click; window.__kleiExpectedPath = $expected;\n$pageScript"
+    }
+    private fun trace(url: String, stage: String, detail: String) {
+        ClaimDiagnostics.event(context, url, stage, detail, web?.url)
+    }
+
+    fun retryUnsubmitted(url: String) {
+        if (Store.claimState(context, url) in listOf("clicked", "clicking", "confirmed", "uncertain")) return
+        if (current == url || queue.contains(url)) return
+        Store.markClaim(context, url, "pending", "用户请求重试尚未提交的领取")
+        trace(url, "manual_retry", "重置未提交任务")
+        enqueue(url)
+    }
 
     fun enqueue(url: String) { enqueueAll(listOf(url)) }
 
@@ -49,7 +70,7 @@ class AutoRedeemer(
         for (raw in rawLinks) {
             val url = Store.verifiedUrl(raw) ?: continue
             val state = Store.claimState(context, url)
-            if (state in listOf("clicked", "clicking", "confirmed", "uncertain", "blocked", "expired", "needs_login"))
+            if (state in listOf("clicked", "clicking", "confirmed", "uncertain", "blocked", "expired", "taken", "needs_login"))
                 continue
             if (current == url || queue.contains(url)) continue
             queue.addLast(url)
@@ -80,7 +101,7 @@ class AutoRedeemer(
         for (i in 0 until count) {
             val url = queue.pollFirst() ?: break
             if (Store.claimState(context, url) in listOf(
-                    "clicked", "clicking", "confirmed", "uncertain", "blocked", "expired", "needs_login")) continue
+                    "clicked", "clicking", "confirmed", "uncertain", "blocked", "expired", "taken", "needs_login")) continue
             val remaining = (eligibleAt[url] ?: 0L) - now
             if (remaining > 0) {
                 queue.addLast(url)
@@ -107,6 +128,12 @@ class AutoRedeemer(
         attempts[url] = attempt
         startedAt = SystemClock.elapsedRealtime()
         polls = 0
+        loginPolls = 0
+        loginSince = 0L
+        loginPage = ""
+        lastPageState = ""
+        trace(url, "navigation_start", "attempt=$attempt")
+        if (attempt == 1) trace(url, "runtime", "Android=${android.os.Build.VERSION.SDK_INT}; WebView=${WebView.getCurrentWebViewPackage()?.versionName ?: "unknown"}")
         Store.markClaim(context, url, "loading", "科雷页面第 $attempt 次加载，尚未点击领取")
         onActive()
         try {
@@ -134,6 +161,13 @@ class AutoRedeemer(
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
             view.webViewClient = object : WebViewClient() {
+                override fun onPageStarted(w: WebView, pageUrl: String, favicon: android.graphics.Bitmap?) {
+                    if (w !== web || finished) return
+                    pageId++
+                    loginPolls = 0
+                    polls = 0
+                    current?.let { trace(it, "page_started", "page=$pageId") }
+                }
                 override fun onPageFinished(w: WebView, pageUrl: String) {
                     if (w !== web || finished) return
                     val url = current ?: return
@@ -145,11 +179,10 @@ class AutoRedeemer(
                         handler.postDelayed({ checkAfterClick(job, url) }, 900L)
                         return
                     }
-                    if (Uri.parse(pageUrl).host?.lowercase() != "accounts.klei.com") {
-                        terminal(url, "needs_login", "跳转至其他登录网站，请先在 App 内完成认证")
-                        return
-                    }
-                    handler.postDelayed({ inspect(job, url) }, 900L)
+                    trace(url, "page_finished", "elapsedMs=${SystemClock.elapsedRealtime() - startedAt}")
+                    // Redirects/challenges are inspected as intermediate states, never proof of expiry.
+                    val page = pageId
+                    handler.postDelayed({ inspect(job, url, page) }, 900L)
                 }
 
                 override fun onReceivedError(w: WebView, request: WebResourceRequest, error: WebResourceError) {
@@ -165,6 +198,7 @@ class AutoRedeemer(
                     val url = current ?: return
                     if (isOtherGift(request.url.toString(), url)) return
                     val status = response.statusCode
+                    trace(url, "http_error", "HTTP $status")
                     when {
                         clicked -> terminal(url, "uncertain", "点击领取后返回 HTTP $status，结果待核实")
                         status == 403 || status == 429 -> terminal(url, "blocked", "科雷 HTTP $status：访问限制，停止自动重试")
@@ -208,6 +242,8 @@ class AutoRedeemer(
             return
         }
         val attempt = attempts[url] ?: 1
+        trace(url, "retry", "$reason; attempt=$attempt")
+        if (attempt == 1 || attempt % 5 == 0) ClaimDiagnostics.capture(context, web, url, "retry")
         val seconds = when {
             attempt <= 1 -> 4L
             attempt == 2 -> 8L
@@ -226,21 +262,34 @@ class AutoRedeemer(
         handler.post { next() }
     }
 
-    private fun inspect(job: Int, url: String) {
-        if (job != jobId || current != url || finished || clicked) return
+    private fun inspect(job: Int, url: String, page: Int) {
+        if (page != pageId || job != jobId || current != url || finished || clicked) return
         val view = web ?: run { retryLater(url, "网页实例丢失"); return }
         if (++polls > 14) {
             retryLater(url, "页面尚未出现领取按钮或明确状态")
             return
         }
-        view.evaluateJavascript(INSPECT_JS) { raw ->
-            if (job != jobId || current != url || finished || clicked) return@evaluateJavascript
+        view.evaluateJavascript(script()) { raw ->
+            if (page != pageId || job != jobId || current != url || finished || clicked) return@evaluateJavascript
+            if (raw != lastPageState) {
+                lastPageState = raw
+                trace(url, "page_state", raw)
+            }
+            if (raw.contains("LOGIN")) {
+                if (loginPolls == 0 || loginPage != view.url.orEmpty()) {
+                    loginSince = SystemClock.elapsedRealtime()
+                    loginPage = view.url.orEmpty()
+                    loginPolls = 0
+                }
+                loginPolls++
+            } else loginPolls = 0
             when {
-                raw.contains("ALREADY") -> terminal(url, "confirmed", "科雷网页显示已领取（请核对账号）")
+                raw.contains("TAKEN") -> terminal(url, "taken", "科雷页面明确显示已被其他人领取")
+                raw.contains("ALREADY") -> terminal(url, "confirmed", "科雷网页显示本账号已领取（请核对奖励记录）")
                 raw.contains("UNAVAILABLE") -> terminal(url, "expired", "科雷网页显示礼物失效或已领完")
-                raw.contains("LOGIN") -> terminal(url, "needs_login", "科雷登录状态失效，请在 App 内登录")
+                raw.contains("LOGIN") && loginPolls >= 3 && SystemClock.elapsedRealtime() - loginSince >= 3500L -> terminal(url, "needs_login", "连续检查发现登录表单或登录要求，请在 App 内完成认证")
                 raw.contains("READY") -> clickOnce(job, url)
-                else -> handler.postDelayed({ inspect(job, url) }, 1300L)
+                else -> handler.postDelayed({ inspect(job, url, page) }, 1300L)
             }
         }
     }
@@ -251,8 +300,10 @@ class AutoRedeemer(
         // Safeguard against a process crash after dispatch: persist first.
         clicked = true
         Store.markClaim(context, url, "clicking", "准备提交一次领取；不允许重复点击")
-        view.evaluateJavascript(CLICK_JS) { raw ->
+        trace(url, "click_dispatch", "已持久化提交保护，即将执行领取脚本")
+        view.evaluateJavascript(script(true)) { raw ->
             if (job != jobId || current != url || finished) return@evaluateJavascript
+            trace(url, "claim_response", raw)
             when {
                 raw.contains("CLICKED") -> {
                     Store.markClicked(context, url, "已点击领取，等待确认")
@@ -268,9 +319,13 @@ class AutoRedeemer(
                     clicked = false
                     retryLater(url, "按钮在点击前消失；未执行领取")
                 }
+                raw.contains("TAKEN") -> terminal(url, "taken", "点击前礼物已被其他人领取，未提交")
                 raw.contains("ALREADY") -> terminal(url, "confirmed", "点击前网页已显示领取成功")
                 raw.contains("UNAVAILABLE") -> terminal(url, "expired", "点击前礼物已失效")
-                raw.contains("LOGIN") -> terminal(url, "needs_login", "点击前科雷要求重新登录")
+                raw.contains("LOGIN") || raw.contains("BUSY") || raw.contains("INTERMEDIATE") || raw.contains("WAIT") -> {
+                    clicked = false // Script explicitly returned before b.click().
+                    retryLater(url, "点击前页面状态改变：$raw；未执行点击")
+                }
                 else -> terminal(url, "uncertain", "领取脚本没有可靠返回值，无法确认是否提交")
             }
         }
@@ -284,18 +339,22 @@ class AutoRedeemer(
     private fun checkAfterClick(job: Int, url: String) {
         if (job != jobId || current != url || finished) return
         val view = web ?: return
-        view.evaluateJavascript(INSPECT_JS) { raw ->
+        view.evaluateJavascript(script()) { raw ->
             if (job != jobId || current != url || finished) return@evaluateJavascript
+            trace(url, "claim_response", raw)
             when {
                 raw.contains("ALREADY") -> terminal(url, "confirmed", "科雷页面显示已领取（请核实账号）")
+                raw.contains("TAKEN") -> terminal(url, "uncertain", "点击后页面显示被其他人领取，请核对奖励记录")
                 raw.contains("UNAVAILABLE") -> terminal(url, "uncertain", "点击后礼物显示不可领取，结果待核实")
-                raw.contains("LOGIN") -> terminal(url, "needs_login", "领奖提交时需要重新登录科雷")
+                raw.contains("LOGIN") -> terminal(url, "uncertain", "提交后出现登录要求，不能确认领取结果，请人工核对")
             }
         }
     }
 
     private fun terminal(url: String, state: String, result: String) {
         if (current != url || finished) return
+        trace(url, "terminal", "$state: $result; elapsedMs=${SystemClock.elapsedRealtime() - startedAt}; submissionGuard=$clicked")
+        ClaimDiagnostics.capture(context, web, url, state, state == "needs_login")
         finished = true
         attempts.remove(url)
         eligibleAt.remove(url)
@@ -320,26 +379,4 @@ class AutoRedeemer(
         web = null
     }
 
-    companion object {
-        private const val JS_BASE = """
-            var text=((document.body && document.body.innerText) || '').toLowerCase();
-            if (/successfully claimed|claimed successfully|you have claimed|reward claimed|领取成功|已成功领取|兑换成功/.test(text)) return 'ALREADY';
-            if (/already claimed|已领取|已经领取/.test(text)) return 'ALREADY';
-            if (/expired|no longer available|sold out|out of stock|gift has been claimed|已失效|已领完|已过期/.test(text)) return 'UNAVAILABLE';
-            if (/please log in|sign in to|login to|请先登录|需要登录|登录科雷账号/.test(text)) return 'LOGIN';
-            if (location.hostname!=='accounts.klei.com') return 'LOGIN';
-            var path=location.pathname || '';
-            if (!path.startsWith('/creatorlink/') && !path.startsWith('/link/')) return 'LOGIN';
-            var buttons=Array.from(document.querySelectorAll('button, input[type=submit], a[role=button], a'));
-            var b=buttons.find(function(x){
-                var label=(x.innerText || x.value || x.getAttribute('aria-label') || '').trim();
-                var style=window.getComputedStyle(x);
-                return /^(claim|claim reward|claim item|claim your reward|claim your gift|redeem|redeem reward|领取|立即领取|领取奖励|兑换|获取奖励)$/i.test(label)
-                && !x.disabled && style.display!=='none' && style.visibility!=='hidden'
-                && x.getBoundingClientRect().width>0 && x.getBoundingClientRect().height>0;
-            });
-        """
-        private val INSPECT_JS = "(function(){ $JS_BASE if(b) return 'READY'; return 'WAIT'; })()"
-        private val CLICK_JS = "(function(){ $JS_BASE if(b){b.click();return 'CLICKED';} return 'NO_BUTTON'; })()"
-    }
 }

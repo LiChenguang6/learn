@@ -12,6 +12,7 @@
         android:usesCleartextTraffic="false"
         android:label="Klei 礼物监控"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name=".DiagnosticsActivity" android:exported="false" />
         <activity android:name=".BrowserActivity" android:exported="false" />
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>

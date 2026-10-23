@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - klei-gift-watcher-android
+      - klei-gift-watcher-diagnostics-v0.4.2
     paths:
       - 'KleiGiftWatcher/**'
       - '.github/workflows/build-klei-apk.yml'
@@ -28,8 +29,10 @@ jobs:
           test -n "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
+      - name: Test claim page classification
+        run: node --test KleiGiftWatcher/tests/claim-page.test.cjs
       - name: Assemble debug APK
-        run: gradle --no-daemon -p KleiGiftWatcher :app:assembleDebug
+        run: gradle --no-daemon -p KleiGiftWatcher :app:assembleDebug :app:lintDebug
       # Verification run: confirm repository signing secrets produce a stable-signed APK.
       # Keep the private key OUT of the public repository and CI artifacts.
       # If these four repository secrets are configured, sign with the stable key.
@@ -44,6 +47,7 @@ jobs:
           if [ -n "$SIGNING_KEYSTORE_B64" ] && [ -n "$SIGNING_PASSWORD" ] && [ -n "$SIGNING_ALIAS" ] && [ -n "$SIGNING_KEY_PASSWORD" ]; then
             umask 077
             KEYSTORE="$RUNNER_TEMP/klei_signing.p12"
+            trap 'rm -f "$KEYSTORE"' EXIT
             printf '%s' "$SIGNING_KEYSTORE_B64" | base64 --decode > "$KEYSTORE"
             export SIGNING_PASSWORD SIGNING_KEY_PASSWORD
             SIGNER="${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/35.0.0/apksigner"
@@ -52,6 +56,9 @@ jobs:
               --out KleiGiftWatcher/app/build/outputs/apk/debug/KleiGiftWatcher-fixed.apk \
               KleiGiftWatcher/app/build/outputs/apk/debug/app-debug.apk
             "$SIGNER" verify --verbose --print-certs KleiGiftWatcher/app/build/outputs/apk/debug/KleiGiftWatcher-fixed.apk
+            # Match the certificate of the user's existing 0.4.1 APK.
+            "$SIGNER" verify --print-certs KleiGiftWatcher/app/build/outputs/apk/debug/KleiGiftWatcher-fixed.apk > "$RUNNER_TEMP/klei-public-certificate.txt"
+            grep -Fq 'Signer #1 certificate SHA-256 digest: 720cedd9b597873f00be628269a99a98f7e0bc010f46e75b183a5a99f88894bb' "$RUNNER_TEMP/klei-public-certificate.txt"
             rm -f "$KEYSTORE"
           else
             echo "Signing secrets are not configured; exporting the debug APK and signing utility instead."

@@ -12,9 +12,11 @@ android {
         minSdk = 26
         // Personal sideload build; Android 15+ foreground-service rules still vary by OS/vendor.
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.4.1"
+        versionCode = 8
+        versionName = "0.4.2"
     }
+
+    buildFeatures { buildConfig = true }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

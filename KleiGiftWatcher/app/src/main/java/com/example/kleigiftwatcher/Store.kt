@@ -107,6 +107,7 @@ object Store {
             .put("claim_state", "pending")
             .put("updated", System.currentTimeMillis())
         data.put(item)
+        ClaimDiagnostics.event(ctx, url, "discovered", "发现礼物链接")
         save(ctx, data)
         true
     }

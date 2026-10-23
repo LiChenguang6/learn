@@ -110,7 +110,7 @@ class MonitorService : Service() {
             intent.getStringExtra(LINK)?.let { raw ->
                 Store.verifiedUrl(raw)?.let { url -> main.post {
                     acquireClaimWake()
-                    redeemer?.enqueue(url)
+                    redeemer?.retryUnsubmitted(url)
                 } }
             }
         }

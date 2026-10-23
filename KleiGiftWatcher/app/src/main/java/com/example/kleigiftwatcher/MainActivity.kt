@@ -136,6 +136,10 @@ class MainActivity : Activity() {
                 catch (e: Exception) { toast("检查失败：${e.message}") }
             }
         })
+        column.addView(Button(this).apply {
+            text = "查看 / 导出领取日志和截图"
+            setOnClickListener { startActivity(Intent(this@MainActivity, DiagnosticsActivity::class.java)) }
+        })
         column.addView(label("手动测试科雷链接（可选）", 14f))
         val manual = EditText(this).apply {
             hint = "https://accounts.klei.com/creatorlink/..."
