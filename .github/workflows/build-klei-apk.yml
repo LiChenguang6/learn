@@ -32,7 +32,7 @@ jobs:
       - name: Test claim page classification
         run: node --test KleiGiftWatcher/tests/claim-page.test.cjs
       - name: Assemble debug APK
-        run: gradle --no-daemon -p KleiGiftWatcher :app:assembleDebug :app:lintDebug
+        run: gradle --no-daemon -p KleiGiftWatcher :app:testDebugUnitTest :app:assembleDebug :app:lintDebug
       # Verification run: confirm repository signing secrets produce a stable-signed APK.
       # Keep the private key OUT of the public repository and CI artifacts.
       # If these four repository secrets are configured, sign with the stable key.

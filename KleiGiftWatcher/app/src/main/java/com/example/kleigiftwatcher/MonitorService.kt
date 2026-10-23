@@ -56,6 +56,7 @@ class MonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         channels()
+        blockedUntil = SystemClock.elapsedRealtime() + Store.cooldownRemaining(this)
         redeemer = AutoRedeemer(this, { url, result ->
             Store.status(this, "领取结果：$result")
             Store.event(this, "科雷领奖结果：${result.take(110)}")
@@ -98,7 +99,7 @@ class MonitorService : Service() {
         val note = Notification.Builder(this, CH_MONITOR)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Klei 礼物监控运行中")
-            .setContentText("网页 ${Store.seconds(this)} 秒；API 备用 ${Store.apiSeconds(this)} 秒")
+            .setContentText("网页 ${Store.seconds(this)} 秒；API 自适应间隔（风控后 +1 秒）")
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "停止监控", stop).build())
             .setOngoing(true)
@@ -228,7 +229,7 @@ class MonitorService : Service() {
                 }
             } catch (e: Exception) {
                 val reason = (e.message ?: e.javaClass.simpleName).take(150)
-                if (reason.contains("HTTP 412") || reason.contains("API -352")) registerBlock(reason)
+                if (e is BiliAccessException) registerBlock(reason, true, e.retryAfterSeconds)
                 else { Store.monitorError(this, "备用 API", reason); Store.status(this, "备用 API 失败：$reason") }
             } finally {
                 if (alive.get() && !scheduler.isShutdown) {
@@ -262,16 +263,23 @@ class MonitorService : Service() {
     }
 
     @Synchronized
-    private fun registerBlock(reason: String) {
+    private fun registerBlock(reason: String, apiBlock: Boolean = false, retryAfter: Long = 0) {
         blockedCount = (blockedCount + 1).coerceAtMost(3)
-        val cooldown = when (blockedCount) { 1 -> 120L; 2 -> 300L; else -> 900L }
+        val cooldown = ApiRatePolicy.cooldownSeconds(blockedCount, retryAfter)
+        if (apiBlock) {
+            val interval = Store.increaseApiInterval(this)
+            Store.event(this, "API 风控：基础检测间隔 +1 秒，当前 $interval 秒；冷却结束后生效")
+            ClaimDiagnostics.event(this, "", "api_backoff", "intervalSeconds=$interval; reason=$reason; cooldownSeconds=$cooldown")
+        }
         blockedUntil = maxOf(blockedUntil, SystemClock.elapsedRealtime() + cooldown * 1000L)
-        Store.monitorError(this, "HTTP 412 / 限制访问", "$reason；冷却 $cooldown 秒")
+        Store.saveCooldown(this, (blockedUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0))
+        Store.monitorError(this, "B站限制访问", "$reason；冷却 $cooldown 秒")
         Store.status(this, "B站访问受限（$reason），暂停请求 $cooldown 秒")
     }
 
     @Synchronized
     private fun clearBlockCount() {
+        if (SystemClock.elapsedRealtime() < blockedUntil) return // Ignore successes from requests already in flight.
         blockedCount = 0
         blockedUntil = 0L
     }

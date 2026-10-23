@@ -23,7 +23,28 @@ object Store {
         }
         prefs.getInt("web_seconds", 1).coerceIn(1, 3600)
     }
-    fun apiSeconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("api_seconds", 60).coerceIn(30, 90)
+    fun apiBaseSeconds(ctx: Context): Int = synchronized(lock) {
+        val prefs = ctx.getSharedPreferences(NAME, 0)
+        if (!prefs.getBoolean("api_one_second_migrated", false)) {
+            prefs.edit().putInt("api_seconds", 1).putInt("api_interval_increases", 0)
+                .putBoolean("api_one_second_migrated", true).commit()
+        }
+        prefs.getInt("api_seconds", 1).coerceIn(1, ApiRatePolicy.MAX_INTERVAL)
+    }
+    fun apiSeconds(ctx: Context): Int = synchronized(lock) {
+        ApiRatePolicy.interval(apiBaseSeconds(ctx), ctx.getSharedPreferences(NAME, 0).getInt("api_interval_increases", 0))
+    }
+    fun increaseApiInterval(ctx: Context): Int = synchronized(lock) {
+        apiBaseSeconds(ctx)
+        val prefs = ctx.getSharedPreferences(NAME, 0)
+        prefs.edit().putInt("api_interval_increases", ApiRatePolicy.nextIncrease(prefs.getInt("api_interval_increases", 0))).commit()
+        apiSeconds(ctx)
+    }
+    fun cooldownRemaining(ctx: Context): Long = (ctx.getSharedPreferences(NAME, 0)
+        .getLong("bili_cooldown_until", 0) - System.currentTimeMillis()).coerceAtLeast(0)
+    fun saveCooldown(ctx: Context, millis: Long) {
+        ctx.getSharedPreferences(NAME, 0).edit().putLong("bili_cooldown_until", System.currentTimeMillis() + millis).commit()
+    }
     fun autoClaim(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("auto_claim", true)
     fun keepAwake(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("keep_awake", false)
     fun resumeOnBoot(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("resume_boot", true)
@@ -39,7 +60,8 @@ object Store {
             .putString("uid", uid)
             .putInt("web_seconds", webSeconds.coerceIn(1, 3600))
             .putBoolean("one_second_interval_migrated", true)
-            .putInt("api_seconds", apiSeconds.coerceIn(30, 90))
+            .putInt("api_seconds", apiSeconds.coerceIn(1, ApiRatePolicy.MAX_INTERVAL))
+            .putBoolean("api_one_second_migrated", true)
             .putBoolean("auto_claim", auto)
             .putBoolean("keep_awake", keepAwake)
             .putBoolean("resume_boot", boot)

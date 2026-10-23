@@ -12,8 +12,8 @@ android {
         minSdk = 26
         // Personal sideload build; Android 15+ foreground-service rules still vary by OS/vendor.
         targetSdk = 34
-        versionCode = 9
-        versionName = "0.4.3"
+        versionCode = 10
+        versionName = "0.4.4"
     }
 
     buildFeatures { buildConfig = true }
@@ -25,3 +25,5 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
+
+dependencies { testImplementation("junit:junit:4.13.2") }

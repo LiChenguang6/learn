@@ -64,7 +64,7 @@ class BiliWebScanner(
                         val code = errorResponse.statusCode
                         val host = request.url.host.orEmpty()
                         val path = request.url.path.orEmpty()
-                        if ((code == 412 || code == 403) &&
+                        if ((code == 412 || code == 403 || code == 429) &&
                             ((host == "api.bilibili.com" && path.contains("web-dynamic")) ||
                             (host == "space.bilibili.com" && request.isForMainFrame))) {
                             done(activeId, null, false, true, "网页请求 HTTP $code")

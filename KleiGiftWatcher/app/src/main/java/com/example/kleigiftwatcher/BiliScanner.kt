@@ -39,7 +39,8 @@ class BiliScanner(private val context: Context) {
                 while (detailCache.size > 12) detailCache.remove(detailCache.keys.first())
             }
             detail
-        } catch (_: Exception) { null }
+        } catch (e: BiliAccessException) { throw e }
+        catch (_: Exception) { null }
     }
 
     fun scan(uid: String): ScanResult {
@@ -100,10 +101,15 @@ class BiliScanner(private val context: Context) {
             } catch (_: Exception) { null }
             if (!cookie.isNullOrBlank()) connection.setRequestProperty("Cookie", cookie)
             val code = connection.responseCode
+            val retryAfter = ApiRatePolicy.retryAfterSeconds(connection.getHeaderField("Retry-After"))
+            if (ApiRatePolicy.isRestricted(http = code) || (code != 200 && retryAfter > 0))
+                throw BiliAccessException("B站 HTTP $code", retryAfter)
             if (code != 200) throw IllegalStateException("B站 HTTP $code")
             val bytes = connection.inputStream.use { it.readBytes() }
             if (bytes.size > 2_000_000) throw IllegalStateException("B站接口响应过大")
             val json = JSONObject(String(bytes, Charsets.UTF_8))
+            if (ApiRatePolicy.isRestricted(api = json.optInt("code")))
+                throw BiliAccessException("B站 API ${json.optInt("code")}", retryAfter)
             if (json.optInt("code", Int.MIN_VALUE) != 0) {
                 throw IllegalStateException("B站 API ${json.optInt("code")}: ${json.optString("message")}")
             }

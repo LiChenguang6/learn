@@ -74,12 +74,12 @@ class MainActivity : Activity() {
         }
         column.addView(seconds)
         column.addView(label("1 秒模式更耗电；加载期间不重复刷新，实际周期取决于网速。遇到限流仍会冷却。", 12f, Color.DKGRAY))
-        column.addView(label("备用 API 检查间隔（秒，30～90 秒）", 14f))
+        column.addView(label("备用 API 初始间隔（秒，1～3600 秒；风控后每次 +1 秒）", 14f))
         apiSeconds = EditText(this).apply {
-            setText(Store.apiSeconds(this@MainActivity).toString())
+            setText(Store.apiBaseSeconds(this@MainActivity).toString())
             inputType = InputType.TYPE_CLASS_NUMBER
             setSingleLine(true)
-            hint = "60"
+            hint = "1"
         }
         column.addView(apiSeconds)
         auto = CheckBox(this).apply {
@@ -185,8 +185,8 @@ class MainActivity : Activity() {
             return false
         }
         val apiEntered = apiSeconds.text.toString().toIntOrNull()
-        if (apiEntered == null || apiEntered !in 30..90) {
-            toast("备用 API 间隔请输入 30～90 秒")
+        if (apiEntered == null || apiEntered !in 1..3600) {
+            toast("备用 API 初始间隔请输入 1～3600 秒")
             return false
         }
         Store.configure(this, uidText, entered, apiEntered, auto.isChecked, keepAwake.isChecked, boot.isChecked)
@@ -203,7 +203,7 @@ class MainActivity : Activity() {
     private fun drawStatus() {
         val message = "监控：${if (Store.active(this)) "运行中" else "已停止"}\n${Store.lastStatus(this)}"
         if (lastStatus != message) { state.text = message; lastStatus = message }
-        val diagText = "检测状态：${Store.diagnostic(this)}\n${Store.latestInfo(this)}"
+        val diagText = "备用 API 当前间隔：${Store.apiSeconds(this)} 秒（风控增量会保留；冷却时间另计）\n检测状态：${Store.diagnostic(this)}\n${Store.latestInfo(this)}"
         val eventText = "最近运行日志：\n" + Store.events(this).joinToString("\n")
         val detail = diagText + eventText
         if (lastDiagnostics != detail) {
