@@ -12,11 +12,17 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+/**
+ * Two channels: a real WebView page refresh and a fallback JSON API.
+ * API requests are skipped when the rendered page was recently readable.
+ * HTTP 412/-352 pauses BOTH channels with bounded increasing backoff.
+ */
 class MonitorService : Service() {
     companion object {
         const val START = "com.example.kleigiftwatcher.START"
@@ -32,8 +38,14 @@ class MonitorService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val alive = AtomicBoolean(false)
-    private var next: ScheduledFuture<*>? = null
+    private val forceCheck = AtomicBoolean(false)
+    private var nextApi: ScheduledFuture<*>? = null
+    private var webTick: Runnable? = null
+    private var webScanner: BiliWebScanner? = null
     private var redeemer: AutoRedeemer? = null
+    @Volatile private var lastWebSuccess = 0L
+    @Volatile private var blockedUntil = 0L
+    private var blockedCount = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -43,7 +55,25 @@ class MonitorService : Service() {
         redeemer = AutoRedeemer(this) { url, result ->
             Store.update(this, url, result)
             Store.status(this, result)
-            if (result.contains("需要") || result.contains("未核实") || result.contains("请手动") || result.contains("已领取")) giftNotification(url, result)
+            if (result.contains("需要") || result.contains("未核实") ||
+                result.contains("请手动") || result.contains("已领取")) giftNotification(url, result)
+        }
+        webScanner = BiliWebScanner(this) { gifts, ready, blocked, info ->
+            if (!alive.get()) return@BiliWebScanner
+            if (blocked) {
+                lastWebSuccess = 0L
+                registerBlock(info)
+            } else if (ready) {
+                lastWebSuccess = SystemClock.elapsedRealtime()
+                clearBlockCount()
+                val newCount = handleGifts(gifts)
+                Store.status(this, "网页：$info，发现 ${gifts.size} 个链接，新增 $newCount")
+            } else {
+                lastWebSuccess = 0L
+                Store.status(this, "网页：$info")
+                // Fallback is only useful when the web view fails or has no readable cards.
+                requestApiNow()
+            }
         }
     }
 
@@ -54,15 +84,15 @@ class MonitorService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val pending = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java),
+        val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val stop = PendingIntent.getService(this, 2, Intent(this, MonitorService::class.java).setAction(STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val note = Notification.Builder(this, CH_MONITOR)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setContentTitle("Klei 礼物监控运行中")
-            .setContentText("B站动态轮询：每 ${Store.seconds(this)} 秒")
-            .setContentIntent(pending)
+            .setContentText("网页 ${Store.seconds(this)} 秒；API 备用 ${Store.apiSeconds(this)} 秒")
+            .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "停止监控", stop).build())
             .setOngoing(true)
             .build()
@@ -74,41 +104,104 @@ class MonitorService : Service() {
                 Store.verifiedUrl(raw)?.let { url -> main.post { redeemer?.enqueue(url) } }
             }
         }
-        val wasRunning = alive.getAndSet(true)
+        val alreadyRunning = alive.getAndSet(true)
         Store.setActive(this, true)
-        if (!wasRunning) schedule(0)
-        else if (intent?.action == CHECK) {
-            next?.cancel(false)
-            schedule(0)
+        if (!alreadyRunning) {
+            scheduleWeb(0)
+            scheduleApi(Store.apiSeconds(this).toLong())
+        } else if (intent?.action == CHECK) {
+            forceCheck.set(true)
+            scheduleWeb(0)
+            requestApiNow()
         }
         return START_STICKY
     }
 
+    private fun scheduleWeb(delayMs: Long) {
+        main.post {
+            webTick?.let { main.removeCallbacks(it) }
+            if (!alive.get()) return@post
+            val task = Runnable {
+                if (!alive.get()) return@Runnable
+                val now = SystemClock.elapsedRealtime()
+                if (now < blockedUntil) {
+                    val remaining = blockedUntil - now
+                    Store.status(this, "B站请求冷却中，约 ${(remaining + 999) / 1000} 秒后恢复")
+                    scheduleWeb(remaining + 1000)
+                    return@Runnable
+                }
+                Store.status(this, "网页正在检查 UID ${Store.uid(this)}")
+                webScanner?.refresh(Store.uid(this))
+                scheduleWeb(Store.seconds(this).toLong() * 1000L)
+            }
+            webTick = task
+            main.postDelayed(task, delayMs)
+        }
+    }
+
+    private fun requestApiNow() {
+        scheduleApi(0)
+    }
+
     @Synchronized
-    private fun schedule(delaySeconds: Long) {
-        if (!alive.get()) return
-        next = scheduler.schedule({
+    private fun scheduleApi(delaySeconds: Long) {
+        if (!alive.get() || scheduler.isShutdown) return
+        nextApi?.cancel(false)
+        nextApi = scheduler.schedule({
             try {
-                Store.status(this, "正在检查 B站 UID ${Store.uid(this)}")
-                val links = BiliScanner(this).scan(Store.uid(this))
-                var newCount = 0
-                for (gift in links) {
-                    if (Store.addNew(this, gift.url, gift.source)) {
-                        newCount++
-                        Store.status(this, "发现新礼物链接")
-                        giftNotification(gift.url, "发现新的科雷礼物链接")
-                        if (Store.autoClaim(this)) main.post { redeemer?.enqueue(gift.url) }
-                        else Store.update(this, gift.url, "已发现，等待手动领取")
+                val now = SystemClock.elapsedRealtime()
+                if (now < blockedUntil) {
+                    Store.status(this, "B站限制访问，正在冷却")
+                } else {
+                    val manual = forceCheck.getAndSet(false)
+                    val recentWeb = lastWebSuccess > 0L &&
+                        now - lastWebSuccess < (Store.seconds(this).toLong() * 3L + 15000L)
+                    if (manual || !recentWeb) {
+                        Store.status(this, "备用 API 正在检查 UID ${Store.uid(this)}")
+                        val gifts = BiliScanner(this).scan(Store.uid(this))
+                        clearBlockCount()
+                        val newCount = handleGifts(gifts)
+                        Store.status(this, "备用 API：发现 ${gifts.size} 个链接，新增 $newCount")
                     }
                 }
-                Store.status(this, "检测完成：发现 ${links.size} 个候选礼物链接，本次新增 $newCount 个")
             } catch (e: Exception) {
                 val reason = (e.message ?: e.javaClass.simpleName).take(150)
-                Store.status(this, "检查失败：$reason")
+                if (reason.contains("HTTP 412") || reason.contains("API -352")) registerBlock(reason)
+                else Store.status(this, "备用 API 失败：$reason")
             } finally {
-                if (alive.get() && !scheduler.isShutdown) schedule(Store.seconds(this).toLong())
+                if (alive.get() && !scheduler.isShutdown) {
+                    val remaining = ((blockedUntil - SystemClock.elapsedRealtime()) / 1000L).coerceAtLeast(0L)
+                    scheduleApi(maxOf(Store.apiSeconds(this).toLong(), remaining + if (remaining > 0L) 1L else 0L))
+                }
             }
-        }, delaySeconds, TimeUnit.SECONDS)
+        }, delaySeconds.coerceAtLeast(0), TimeUnit.SECONDS)
+    }
+
+    private fun handleGifts(gifts: List<BiliScanner.Gift>): Int {
+        var count = 0
+        for (gift in gifts) {
+            if (Store.addNew(this, gift.url, gift.source)) {
+                count++
+                giftNotification(gift.url, "发现新的科雷礼物链接")
+                if (Store.autoClaim(this)) main.post { redeemer?.enqueue(gift.url) }
+                else Store.update(this, gift.url, "已发现，等待手动领取")
+            }
+        }
+        return count
+    }
+
+    @Synchronized
+    private fun registerBlock(reason: String) {
+        blockedCount = (blockedCount + 1).coerceAtMost(3)
+        val cooldown = when (blockedCount) { 1 -> 120L; 2 -> 300L; else -> 900L }
+        blockedUntil = maxOf(blockedUntil, SystemClock.elapsedRealtime() + cooldown * 1000L)
+        Store.status(this, "B站访问受限（$reason），暂停请求 $cooldown 秒")
+    }
+
+    @Synchronized
+    private fun clearBlockCount() {
+        blockedCount = 0
+        blockedUntil = 0L
     }
 
     private fun channels() {
@@ -138,8 +231,11 @@ class MonitorService : Service() {
 
     override fun onDestroy() {
         alive.set(false)
-        next?.cancel(true)
+        nextApi?.cancel(true)
         scheduler.shutdownNow()
+        webTick?.let { main.removeCallbacks(it) }
+        webScanner?.destroy()
+        webScanner = null
         main.removeCallbacksAndMessages(null)
         redeemer?.destroy()
         redeemer = null
