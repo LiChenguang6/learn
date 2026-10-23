@@ -24,6 +24,7 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var uid: EditText
     private lateinit var seconds: EditText
+    private lateinit var apiSeconds: EditText
     private lateinit var auto: CheckBox
     private lateinit var state: TextView
     private lateinit var records: LinearLayout
@@ -57,14 +58,22 @@ class MainActivity : Activity() {
             hint = "12875864"
         }
         column.addView(uid)
-        column.addView(label("轮询间隔（秒，最低 30 秒；建议 60 秒）", 14f))
+        column.addView(label("网页刷新间隔（秒，最低 10 秒；建议 15 秒）", 14f))
         seconds = EditText(this).apply {
             setText(Store.seconds(this@MainActivity).toString())
             inputType = InputType.TYPE_CLASS_NUMBER
             setSingleLine(true)
-            hint = "60"
+            hint = "15"
         }
         column.addView(seconds)
+        column.addView(label("备用 API 检查间隔（秒，30～90 秒）", 14f))
+        apiSeconds = EditText(this).apply {
+            setText(Store.apiSeconds(this@MainActivity).toString())
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            hint = "60"
+        }
+        column.addView(apiSeconds)
         auto = CheckBox(this).apply {
             text = "发现链接后自动尝试领取（网页自动化，不能保证成功）"
             isChecked = Store.autoClaim(this@MainActivity)
@@ -133,11 +142,16 @@ class MainActivity : Activity() {
             return false
         }
         val entered = seconds.text.toString().toIntOrNull()
-        if (entered == null || entered !in 30..3600) {
-            toast("轮询间隔请输入 30～3600 秒")
+        if (entered == null || entered !in 10..3600) {
+            toast("网页刷新间隔请输入 10～3600 秒")
             return false
         }
-        Store.configure(this, uidText, entered, auto.isChecked)
+        val apiEntered = apiSeconds.text.toString().toIntOrNull()
+        if (apiEntered == null || apiEntered !in 30..90) {
+            toast("备用 API 间隔请输入 30～90 秒")
+            return false
+        }
+        Store.configure(this, uidText, entered, apiEntered, auto.isChecked)
         toast("设置已保存")
         return true
     }
