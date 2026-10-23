@@ -19,6 +19,29 @@ class BiliScanner(private val context: Context) {
     private val linkPattern = Pattern.compile("https?://accounts\\.klei\\.com/(?:creatorlink|link)/[^\\s\\\"'<>\\]\\[(){}]+", Pattern.CASE_INSENSITIVE)
     private val encodedPattern = Pattern.compile("https?%3A%2F%2Faccounts\\.klei\\.com%2F(?:creatorlink|link)%2F[^\\s\\\"'<>\\]\\[(){}]+", Pattern.CASE_INSENSITIVE)
 
+    companion object {
+        // Reuse detail responses to avoid 2-3 extra HTTP requests on every poll.
+        private val detailLock = Any()
+        private val detailCache = LinkedHashMap<String, Pair<Long, JSONObject>>()
+        private const val DETAIL_TTL_MS = 120000L
+    }
+
+    private fun cachedDetail(id: String): JSONObject? {
+        synchronized(detailLock) {
+            val cached = detailCache[id]
+            if (cached != null && System.currentTimeMillis() - cached.first < DETAIL_TTL_MS)
+                return cached.second
+        }
+        return try {
+            val detail = getJson("https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/detail?id=$id&features=htmlNewStyle")
+            synchronized(detailLock) {
+                detailCache[id] = System.currentTimeMillis() to detail
+                while (detailCache.size > 12) detailCache.remove(detailCache.keys.first())
+            }
+            detail
+        } catch (_: Exception) { null }
+    }
+
     fun scan(uid: String): ScanResult {
         require(uid.matches(Regex("[0-9]{1,20}"))) { "B站 UID 必须是数字" }
         val root = getJson("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${URLEncoder.encode(uid, "UTF-8")}&features=itemOpusStyle")
@@ -32,15 +55,15 @@ class BiliScanner(private val context: Context) {
             val source = if (id.matches(Regex("[0-9]+"))) "https://www.bilibili.com/opus/$id" else "https://space.bilibili.com/$uid/dynamic"
             val links = linkedSetOf<String>()
             findLinks(item, links)
-            // Some articles contain the URL only in the full opus body.
-            // Limit detail requests to three latest text/image posts to reduce Bilibili rate limits.
+            // A single opus may contain MANY different creator links, including
+            // ones hidden in full detail when the feed provides only an excerpt.
+            // For the latest two text/draw items always merge detail links,
+            // even if one link was already visible in the feed. Cache results
+            // so this does not make multiple extra requests each poll.
             val type = item.optString("type").uppercase()
-            if (links.isEmpty() && i < 3 && id.matches(Regex("[0-9]+")) &&
+            if (i < 2 && id.matches(Regex("[0-9]+")) &&
                 (type.contains("DRAW") || type.contains("ARTICLE") || type.contains("WORD"))) {
-                try {
-                    val detail = getJson("https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/detail?id=$id&features=htmlNewStyle")
-                    findLinks(detail.optJSONObject("data"), links)
-                } catch (_: Exception) { /* feed still useful even if detail blocked */ }
+                cachedDetail(id)?.optJSONObject("data")?.let { findLinks(it, links) }
             }
             for (link in links) found[link] = Gift(link, source)
         }
@@ -57,7 +80,7 @@ class BiliScanner(private val context: Context) {
         val results = LinkedHashMap<String, Gift>()
         for (card in cards.take(15)) {
             val links = linkedSetOf<String>()
-            findLinks(card.content.take(60000), links)
+            findLinks(card.content.take(240000), links)
             for (link in links) results[link] = Gift(link, card.source)
         }
         return ScanResult(results.values.toList(), cards.firstOrNull()?.id.orEmpty(),
@@ -89,7 +112,7 @@ class BiliScanner(private val context: Context) {
     }
 
     private fun findLinks(node: Any?, result: MutableSet<String>, depth: Int = 0) {
-        if (node == null || depth > 14 || result.size >= 30) return
+        if (node == null || depth > 22 || result.size >= 150) return
         when (node) {
             is JSONObject -> {
                 for (key in node.keys()) findLinks(node.opt(key), result, depth + 1)

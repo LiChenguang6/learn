@@ -174,7 +174,7 @@ class BiliWebScanner(
                 var opus = el.querySelector('a[href*="/opus/"]');
                 var anchor = opus ? opus.href : '';
                 var links = Array.from(el.querySelectorAll('a[href]'))
-                    .slice(0, 45).map(function(a) { return a.href; }).join(' ');
+                    .slice(0, 150).map(function(a) { return a.href; }).join(' ');
                 var dyn = el.getAttribute('data-did') || el.getAttribute('data-dynamic-id') ||
                     (el.querySelector('[dyn-id]') || {}).getAttribute?.('dyn-id') || '';
                 var id = dyn || ((anchor.match(/\/opus\/(\d+)/) || [])[1] || '');
@@ -183,8 +183,8 @@ class BiliWebScanner(
                     source: anchor || (id ? 'https://www.bilibili.com/opus/' + id : location.href),
                     id: id,
                     time: timeEl ? (timeEl.innerText || '').slice(0, 70) : '',
-                    content: (el.innerText || '').slice(0, 18000) + ' ' + links + ' ' +
-                        (el.innerHTML || '').slice(0, 30000)
+                    content: (el.innerText || '').slice(0, 70000) + ' ' + links + ' ' +
+                        (el.innerHTML || '').slice(0, 130000)
                 };
             });
             return JSON.stringify({cards: result, meta: {
