@@ -24,7 +24,10 @@ jobs:
           gradle-version: '8.9'
       - name: Ensure required Android SDK packages
         run: |
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          SDKMANAGER=$(find "${ANDROID_HOME:-/usr/local/lib/android/sdk}/cmdline-tools" -name sdkmanager -type f -print -quit)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
       - name: Assemble debug APK
         run: gradle --no-daemon -p KleiGiftWatcher :app:assembleDebug
       - name: Upload APK
