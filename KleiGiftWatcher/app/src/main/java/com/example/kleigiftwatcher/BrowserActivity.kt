@@ -6,6 +6,8 @@ import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
+import org.json.JSONObject
+import org.json.JSONTokener
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
@@ -24,12 +26,18 @@ class BrowserActivity : Activity() {
     }
     private lateinit var web: WebView
     private lateinit var status: TextView
+    private var debugging = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val site = intent.getStringExtra(EXTRA_SITE) ?: "klei"
-        val initial = if (site == "bili") "https://www.bilibili.com/" else "https://accounts.klei.com/"
+        debugging = site == "bili_debug"
+        val initial = when (site) {
+            "bili_debug" -> "https://space.bilibili.com/${Store.uid(this)}/dynamic"
+            "bili" -> "https://www.bilibili.com/"
+            else -> "https://accounts.klei.com/"
+        }
         val requested = intent.getStringExtra(EXTRA_URL)
         val url = if (site == "klei") Store.verifiedUrl(requested ?: "") ?: initial else initial
 
@@ -52,16 +60,30 @@ class BrowserActivity : Activity() {
         nav.addView(reload, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         nav.addView(home, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(nav)
+        if (debugging) {
+            val check = Button(this).apply {
+                text = "检测当前可见网页的动态卡片"
+                setOnClickListener { inspectPage() }
+            }
+            root.addView(check)
+            status.text = "正在打开 B站动态网页。看到动态后点击「检测当前可见网页」。"
+        }
         web = WebView(this)
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
         web.settings.setSupportMultipleWindows(false)
+        if (debugging) web.settings.userAgentString = BiliWebScanner.DESKTOP_UA
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
         web.webChromeClient = WebChromeClient()
         web.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView, current: String) {
-                status.text = "当前页面：${Uri.parse(current).host ?: current}  ·  登录后返回 App 开始监控"
+                if (debugging) {
+                    status.text = "页面已加载，正在检查动态卡片：$current"
+                    web.postDelayed({ if (!isFinishing) inspectPage() }, 4500)
+                } else {
+                    status.text = "当前页面：${Uri.parse(current).host ?: current}  ·  登录后返回 App 开始监控"
+                }
                 CookieManager.getInstance().flush()
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
@@ -75,6 +97,32 @@ class BrowserActivity : Activity() {
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
         web.loadUrl(url)
+    }
+
+    private fun inspectPage() {
+        if (!debugging || !::web.isInitialized) return
+        web.evaluateJavascript(BiliWebScanner.EXTRACT_JS) { encoded ->
+            try {
+                val json = JSONObject(JSONTokener(encoded).nextValue() as String)
+                val meta = json.getJSONObject("meta")
+                val cards = json.getJSONArray("cards")
+                val list = ArrayList<BiliScanner.Card>()
+                for (i in 0 until cards.length().coerceAtMost(15)) {
+                    val card = cards.getJSONObject(i)
+                    list.add(BiliScanner.Card(card.optString("source"), card.optString("content"),
+                        card.optString("id"), card.optString("time")))
+                }
+                val result = BiliScanner(this).scanPage(list)
+                val page = meta.optString("url").take(75)
+                val title = meta.optString("title").take(55)
+                val preview = meta.optString("preview").replace('\n', ' ').take(70)
+                status.text = "网页诊断：动态卡片 ${result.cardCount} 条；礼物链接 ${result.gifts.size} 条；" +
+                    "最新动态 ID ${result.latestId.ifBlank { "未知" }}\\n标题：$title\\n地址：$page\\n片段：$preview"
+                Store.event(this, "可见网页诊断：卡片 ${result.cardCount}，链接 ${result.gifts.size}；$title")
+            } catch (e: Exception) {
+                status.text = "网页诊断脚本失败：${e.javaClass.simpleName}"
+            }
+        }
     }
 
     override fun onBackPressed() {

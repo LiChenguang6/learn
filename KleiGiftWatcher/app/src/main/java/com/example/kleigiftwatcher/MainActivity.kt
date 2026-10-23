@@ -126,9 +126,15 @@ class MainActivity : Activity() {
                 catch (e: Exception) { toast("启动失败：${e.message}") }
             }
         }, "登录科雷账号" to { openBrowser("klei") })
-        row(column, "登录 B站（可选）" to { openBrowser("bili") }, "刷新记录" to {
+        row(column, "打开 B站动态网页诊断" to { openBrowser("bili_debug") }, "刷新记录" to {
             previousHistory = ""
             drawStatus()
+        })
+        row(column, "登录 B站（可选）" to { openBrowser("bili") }, "立即检查动态" to {
+            if (save()) {
+                try { startForegroundService(Intent(this, MonitorService::class.java).setAction(MonitorService.CHECK)) }
+                catch (e: Exception) { toast("检查失败：${e.message}") }
+            }
         })
         column.addView(label("手动测试科雷链接（可选）", 14f))
         val manual = EditText(this).apply {
