@@ -18,16 +18,57 @@ object Store {
     fun seconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("web_seconds", 15).coerceIn(10, 3600)
     fun apiSeconds(ctx: Context): Int = ctx.getSharedPreferences(NAME, 0).getInt("api_seconds", 60).coerceIn(30, 90)
     fun autoClaim(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("auto_claim", true)
+    fun keepAwake(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("keep_awake", false)
+    fun resumeOnBoot(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("resume_boot", true)
     fun active(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("active", false)
     fun lastStatus(ctx: Context): String = ctx.getSharedPreferences(NAME, 0).getString("status", "尚未检查") ?: "尚未检查"
 
-    fun configure(ctx: Context, uid: String, webSeconds: Int, apiSeconds: Int, auto: Boolean) {
+    fun configure(ctx: Context, uid: String, webSeconds: Int, apiSeconds: Int, auto: Boolean, keepAwake: Boolean, boot: Boolean) {
         ctx.getSharedPreferences(NAME, 0).edit()
             .putString("uid", uid)
             .putInt("web_seconds", webSeconds.coerceIn(10, 3600))
             .putInt("api_seconds", apiSeconds.coerceIn(30, 90))
             .putBoolean("auto_claim", auto)
+            .putBoolean("keep_awake", keepAwake)
+            .putBoolean("resume_boot", boot)
             .apply()
+    }
+
+    fun latestInfo(ctx: Context): String = ctx.getSharedPreferences(NAME, 0)
+        .getString("latest_info", "尚未成功解析动态") ?: "尚未成功解析动态"
+
+    fun diagnostic(ctx: Context): String = ctx.getSharedPreferences(NAME, 0)
+        .getString("diagnostic", "尚无检测信息") ?: "尚无检测信息"
+
+    fun events(ctx: Context): List<String> = synchronized(lock) {
+        val arr = try { JSONArray(ctx.getSharedPreferences(NAME, 0).getString("events", "[]")) }
+            catch (_: Exception) { JSONArray() }
+        (arr.length() - 1 downTo 0).take(12).map { arr.optString(it) }
+    }
+
+    fun event(ctx: Context, message: String) = synchronized(lock) {
+        val prefs = ctx.getSharedPreferences(NAME, 0)
+        val arr = try { JSONArray(prefs.getString("events", "[]")) } catch (_: Exception) { JSONArray() }
+        val stamp = SimpleDateFormat("MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        arr.put("$stamp · ${message.take(150)}")
+        val limited = JSONArray()
+        for (i in (arr.length() - 80).coerceAtLeast(0) until arr.length()) limited.put(arr.optString(i))
+        prefs.edit().putString("events", limited.toString()).apply()
+    }
+
+    fun monitorResult(ctx: Context, method: String, latestId: String, pubTime: String, cards: Int, gifts: Int) {
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val info = "最近成功检测：$stamp\\n通道：$method · 动态数：$cards · 礼物链接：$gifts\\n最新动态 ID：${latestId.ifBlank { "无法解析" }}\\n发布时间：${pubTime.ifBlank { "无法解析" }}"
+        ctx.getSharedPreferences(NAME, 0).edit().putString("latest_info", info)
+            .putString("diagnostic", "正常 · $method · $stamp").apply()
+        event(ctx, "$method 成功：动态 $cards 条 / 礼物 $gifts 条，最新 ID ${latestId.ifBlank { "未知" }}")
+    }
+
+    fun monitorError(ctx: Context, method: String, detail: String) {
+        val stamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+        ctx.getSharedPreferences(NAME, 0).edit()
+            .putString("diagnostic", "$stamp · $method：${detail.take(140)}").apply()
+        event(ctx, "$method：$detail")
     }
 
     fun setActive(ctx: Context, value: Boolean) {

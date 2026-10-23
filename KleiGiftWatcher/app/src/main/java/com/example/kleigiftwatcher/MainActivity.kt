@@ -1,6 +1,8 @@
 package com.example.kleigiftwatcher
 
 import android.Manifest
+import android.net.Uri
+import android.provider.Settings
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -26,10 +28,15 @@ class MainActivity : Activity() {
     private lateinit var seconds: EditText
     private lateinit var apiSeconds: EditText
     private lateinit var auto: CheckBox
+    private lateinit var keepAwake: CheckBox
+    private lateinit var boot: CheckBox
+    private lateinit var diagnostics: TextView
+    private lateinit var events: TextView
     private lateinit var state: TextView
     private lateinit var records: LinearLayout
     private var previousHistory = ""
     private var lastStatus = ""
+    private var lastDiagnostics = ""
     private val refresh = object : Runnable {
         override fun run() {
             if (::state.isInitialized) drawStatus()
@@ -80,6 +87,26 @@ class MainActivity : Activity() {
             textSize = 14f
         }
         column.addView(auto)
+        keepAwake = CheckBox(this).apply {
+            text = "锁屏增强：保持 CPU 唤醒（耗电明显，建议充电时使用）"
+            isChecked = Store.keepAwake(this@MainActivity)
+            textSize = 13f
+        }
+        column.addView(keepAwake)
+        boot = CheckBox(this).apply {
+            text = "设备重启后尝试恢复监控（受系统版本限制）"
+            isChecked = Store.resumeOnBoot(this@MainActivity)
+            textSize = 13f
+        }
+        column.addView(boot)
+        row(column, "打开系统后台设置" to {
+            try { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }
+            catch (e: Exception) { toast("无法打开设置：${e.message}") }
+        }, "刷新检测状态" to { drawStatus() })
+        diagnostics = label("", 13f, Color.DKGRAY)
+        column.addView(diagnostics)
+        events = label("", 11f, Color.GRAY)
+        column.addView(events)
         state = label("", 14f, Color.rgb(18, 88, 60))
         column.addView(state)
 
@@ -151,7 +178,7 @@ class MainActivity : Activity() {
             toast("备用 API 间隔请输入 30～90 秒")
             return false
         }
-        Store.configure(this, uidText, entered, apiEntered, auto.isChecked)
+        Store.configure(this, uidText, entered, apiEntered, auto.isChecked, keepAwake.isChecked, boot.isChecked)
         toast("设置已保存")
         return true
     }
@@ -165,6 +192,14 @@ class MainActivity : Activity() {
     private fun drawStatus() {
         val message = "监控：${if (Store.active(this)) "运行中" else "已停止"}\n${Store.lastStatus(this)}"
         if (lastStatus != message) { state.text = message; lastStatus = message }
+        val diagText = "检测状态：${Store.diagnostic(this)}\n${Store.latestInfo(this)}"
+        val eventText = "最近运行日志：\n" + Store.events(this).joinToString("\n")
+        val detail = diagText + eventText
+        if (lastDiagnostics != detail) {
+            diagnostics.text = diagText
+            events.text = eventText
+            lastDiagnostics = detail
+        }
         val rows = Store.rows(this)
         val signature = rows.joinToString("|") { it.optString("url") + it.optString("status") + it.optLong("updated") }
         if (signature == previousHistory) return

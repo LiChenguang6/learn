@@ -22,7 +22,7 @@ import org.json.JSONTokener
  */
 class BiliWebScanner(
     private val context: Context,
-    private val onResult: (List<BiliScanner.Gift>, Boolean, Boolean, String) -> Unit
+    private val onResult: (BiliScanner.ScanResult?, Boolean, Boolean, String) -> Unit
 ) {
     private val handler = Handler(Looper.getMainLooper())
     private var web: WebView? = null
@@ -34,7 +34,7 @@ class BiliWebScanner(
     @SuppressLint("SetJavaScriptEnabled")
     fun refresh(uid: String) {
         if (!uid.matches(Regex("[0-9]{1,20}"))) {
-            onResult(emptyList(), false, false, "无效的 UID")
+            onResult(null, false, false, "无效的 UID")
             return
         }
         val id = ++activeId
@@ -66,12 +66,12 @@ class BiliWebScanner(
                         if ((host == "api.bilibili.com" && path.contains("web-dynamic")) ||
                             (host == "space.bilibili.com" && request.isForMainFrame)) {
                             saw412 = true
-                            done(activeId, emptyList(), false, true, "网页加载遇到 HTTP 412")
+                            done(activeId, null, false, true, "网页加载遇到 HTTP 412")
                         }
                     }
 
                     override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
-                        if (request.isForMainFrame) done(activeId, emptyList(), false, false, "B站网页加载失败")
+                        if (request.isForMainFrame) done(activeId, null, false, false, "B站网页加载失败")
                     }
                 }
                 // Headless WebView rendering is device-dependent. It still needs a layout.
@@ -85,10 +85,10 @@ class BiliWebScanner(
             view.stopLoading()
             view.loadUrl(url)
             handler.postDelayed({
-                if (id == activeId && !finished) done(id, emptyList(), false, saw412, "网页超时，切换备用 API")
+                if (id == activeId && !finished) done(id, null, false, saw412, "网页超时，切换备用 API")
             }, 14000)
         } catch (e: Exception) {
-            done(id, emptyList(), false, false, "WebView 不可用：${e.javaClass.simpleName}")
+            done(id, null, false, false, "WebView 不可用：${e.javaClass.simpleName}")
         }
     }
 
@@ -102,7 +102,7 @@ class BiliWebScanner(
                 val root = JSONObject(decoded)
                 val cards = root.optJSONArray("cards")
                 if (cards != null && cards.length() > 0) {
-                    val elements = ArrayList<Pair<String, String>>()
+                    val elements = ArrayList<BiliScanner.Card>()
                     val currentUrl = view.url.orEmpty()
                     for (i in 0 until cards.length().coerceAtMost(15)) {
                         val item = cards.optJSONObject(i) ?: continue
@@ -110,22 +110,22 @@ class BiliWebScanner(
                             it.startsWith("https://www.bilibili.com/opus/") ||
                             it.startsWith("https://space.bilibili.com/")
                         } ?: currentUrl
-                        elements.add(src to item.optString("content"))
+                        elements.add(BiliScanner.Card(src, item.optString("content"), item.optString("id"), item.optString("time")))
                     }
                     val matches = BiliScanner(context).scanPage(elements)
                     done(id, matches, true, false, "网页解析 ${elements.size} 条动态")
                 } else if (++cardAttempts < 3) {
                     handler.postDelayed({ inspect(id) }, 2500)
                 } else {
-                    done(id, emptyList(), false, false, "网页未显示动态卡片，改用备用 API")
+                    done(id, null, false, false, "网页未显示动态卡片，改用备用 API")
                 }
             } catch (_: Exception) {
-                done(id, emptyList(), false, false, "网页内容解析失败")
+                done(id, null, false, false, "网页内容解析失败")
             }
         }
     }
 
-    private fun done(id: Int, gifts: List<BiliScanner.Gift>, ready: Boolean, blocked: Boolean, info: String) {
+    private fun done(id: Int, gifts: BiliScanner.ScanResult?, ready: Boolean, blocked: Boolean, info: String) {
         if (id != activeId || finished) return
         finished = true
         onResult(gifts, ready, blocked, info)
@@ -154,6 +154,8 @@ class BiliWebScanner(
                     .slice(0, 40).map(function(a) { return a.href; }).join(' ');
                 return {
                     source: a ? a.href : location.href,
+                    id: (a ? ((a.href.match(/\\/opus\\/(\\d+)/)||[])[1] || '') : '') || el.getAttribute('data-dynamic-id') || '',
+                    time: (el.querySelector('.bili-dyn-time, .bili-dyn-item__header__time, [class*="pub-time"]') || {}).innerText || '',
                     content: (el.innerText || '').slice(0, 18000) + ' ' +
                         links + ' ' + (el.innerHTML || '').slice(0, 30000)
                 };

@@ -12,12 +12,14 @@ import java.util.regex.Pattern
 
 class BiliScanner(private val context: Context) {
     data class Gift(val url: String, val source: String)
+    data class Card(val source: String, val content: String, val id: String, val time: String)
+    data class ScanResult(val gifts: List<Gift>, val latestId: String, val latestTime: String, val cardCount: Int)
 
     // Matches the literal URL also when surrounded by rich-text markup.
     private val linkPattern = Pattern.compile("https?://accounts\\.klei\\.com/(?:creatorlink|link)/[^\\s\\\"'<>\\]\\[(){}]+", Pattern.CASE_INSENSITIVE)
     private val encodedPattern = Pattern.compile("https?%3A%2F%2Faccounts\\.klei\\.com%2F(?:creatorlink|link)%2F[^\\s\\\"'<>\\]\\[(){}]+", Pattern.CASE_INSENSITIVE)
 
-    fun scan(uid: String): List<Gift> {
+    fun scan(uid: String): ScanResult {
         require(uid.matches(Regex("[0-9]{1,20}"))) { "B站 UID 必须是数字" }
         val root = getJson("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${URLEncoder.encode(uid, "UTF-8")}&features=itemOpusStyle")
         val items = root.optJSONObject("data")?.optJSONArray("items")
@@ -42,18 +44,24 @@ class BiliScanner(private val context: Context) {
             }
             for (link in links) found[link] = Gift(link, source)
         }
-        return found.values.toList()
+        val latest = items.optJSONObject(0)
+        val latestId = latest?.optString("id_str").orEmpty()
+        val pubTs = latest?.optJSONObject("modules")?.optJSONObject("module_author")?.optLong("pub_ts", 0L) ?: 0L
+        val latestTime = if (pubTs > 0L) java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date(pubTs * 1000L)) else latest?.optJSONObject("modules")?.optJSONObject("module_author")?.optString("pub_time").orEmpty()
+        return ScanResult(found.values.toList(), latestId, latestTime, total)
     }
 
-    /** Extracts Klei links from actual browser-rendered dynamic cards. */
-    fun scanPage(cards: List<Pair<String, String>>): List<Gift> {
+    /** Extracts Klei links and metadata from actual browser-rendered dynamic cards. */
+    fun scanPage(cards: List<Card>): ScanResult {
         val results = LinkedHashMap<String, Gift>()
-        for ((source, text) in cards.take(15)) {
+        for (card in cards.take(15)) {
             val links = linkedSetOf<String>()
-            findLinks(text.take(60000), links)
-            for (link in links) results[link] = Gift(link, source)
+            findLinks(card.content.take(60000), links)
+            for (link in links) results[link] = Gift(link, card.source)
         }
-        return results.values.toList()
+        return ScanResult(results.values.toList(), cards.firstOrNull()?.id.orEmpty(),
+            cards.firstOrNull()?.time.orEmpty(), cards.size.coerceAtMost(15))
     }
 
     private fun getJson(url: String): JSONObject {
