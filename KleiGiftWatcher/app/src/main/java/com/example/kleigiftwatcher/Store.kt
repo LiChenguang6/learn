@@ -104,10 +104,61 @@ object Store {
             .put("url", url)
             .put("source", source)
             .put("status", "发现新链接")
+            .put("claim_state", "pending")
             .put("updated", System.currentTimeMillis())
         data.put(item)
         save(ctx, data)
         true
+    }
+
+    // Claim states survive a killed process. Never replay a link whose claim
+    // button may already have been clicked: one-time rewards are not idempotent.
+    fun markClaim(ctx: Context, rawUrl: String, state: String, message: String) = synchronized(lock) {
+        val url = verifiedUrl(rawUrl) ?: return@synchronized
+        val items = history(ctx)
+        var row: JSONObject? = null
+        for (i in 0 until items.length()) {
+            val entry = items.optJSONObject(i) ?: continue
+            if (entry.optString("url") == url) { row = entry; break }
+        }
+        if (row == null) {
+            row = JSONObject().put("url", url).put("source", "恢复任务")
+            items.put(row)
+        }
+        row.put("claim_state", state).put("status", message)
+            .put("updated", System.currentTimeMillis())
+        save(ctx, items)
+        event(ctx, "领取状态：$state · ${message.take(75)}")
+    }
+
+    fun claimState(ctx: Context, rawUrl: String): String = synchronized(lock) {
+        val url = verifiedUrl(rawUrl) ?: return@synchronized ""
+        val items = history(ctx)
+        for (i in 0 until items.length()) {
+            val row = items.optJSONObject(i) ?: continue
+            if (row.optString("url") == url) return@synchronized row.optString("claim_state")
+        }
+        ""
+    }
+
+    // Only unclicked jobs can be recovered automatically after a service restart.
+    fun pendingClaims(ctx: Context): List<String> = synchronized(lock) {
+        val items = history(ctx)
+        val result = ArrayList<String>()
+        for (i in (items.length() - 1) downTo 0) {
+            val row = items.optJSONObject(i) ?: continue
+            val state = row.optString("claim_state")
+            if (state == "pending" || state == "loading") {
+                verifiedUrl(row.optString("url"))?.let { result.add(it) }
+            }
+            if (result.size >= 8) break
+        }
+        result
+    }
+
+    fun markClicked(ctx: Context, rawUrl: String, message: String) {
+        markClaim(ctx, rawUrl, "clicked", message)
+        // Persistent commit is completed in markClaim before another navigation.
     }
 
     fun update(ctx: Context, rawUrl: String, status: String) = synchronized(lock) {
