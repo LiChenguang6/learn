@@ -40,11 +40,21 @@ object Store {
         prefs.edit().putInt("api_interval_increases", ApiRatePolicy.nextIncrease(prefs.getInt("api_interval_increases", 0))).commit()
         apiSeconds(ctx)
     }
-    fun cooldownRemaining(ctx: Context): Long = (ctx.getSharedPreferences(NAME, 0)
-        .getLong("bili_cooldown_until", 0) - System.currentTimeMillis()).coerceAtLeast(0)
-    fun saveCooldown(ctx: Context, millis: Long) {
-        ctx.getSharedPreferences(NAME, 0).edit().putLong("bili_cooldown_until", System.currentTimeMillis() + millis).commit()
+    fun cooldownRemaining(ctx: Context, channel: MonitorChannel): Long = synchronized(lock) {
+        val prefs = ctx.getSharedPreferences(NAME, 0)
+        if (!prefs.getBoolean("independent_cooldowns_migrated", false)) {
+            val legacy = prefs.getLong("bili_cooldown_until", 0)
+            prefs.edit().putLong("bili_WEB_cooldown_until", legacy).putLong("bili_API_cooldown_until", legacy)
+                .putBoolean("independent_cooldowns_migrated", true).commit()
+        }
+        (prefs.getLong("bili_${channel.name}_cooldown_until", 0) - System.currentTimeMillis()).coerceAtLeast(0)
     }
+    fun saveCooldown(ctx: Context, channel: MonitorChannel, millis: Long) {
+        ctx.getSharedPreferences(NAME, 0).edit()
+            .putLong("bili_${channel.name}_cooldown_until", System.currentTimeMillis() + millis).commit()
+    }
+    fun channelStatus(ctx: Context, channel: MonitorChannel): String = ctx.getSharedPreferences(NAME, 0)
+        .getString("channel_${channel.name}_status", "尚未检查") ?: "尚未检查"
     fun autoClaim(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("auto_claim", true)
     fun keepAwake(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("keep_awake", false)
     fun resumeOnBoot(ctx: Context): Boolean = ctx.getSharedPreferences(NAME, 0).getBoolean("resume_boot", true)
@@ -109,9 +119,12 @@ object Store {
         ctx.getSharedPreferences(NAME, 0).edit().putBoolean("active", value).apply()
     }
 
-    fun status(ctx: Context, message: String) {
+    fun status(ctx: Context, message: String, channel: MonitorChannel? = null) {
         val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-        ctx.getSharedPreferences(NAME, 0).edit().putString("status", "$time · $message").apply()
+        ctx.getSharedPreferences(NAME, 0).edit().apply {
+            putString("status", "$time · $message")
+            if (channel != null) putString("channel_${channel.name}_status", "$time · $message")
+        }.apply()
     }
 
     // Only allow actual Klei rewards links, never arbitrary URLs from a Bilibili post.

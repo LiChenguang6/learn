@@ -19,7 +19,7 @@ import org.json.JSONTokener
  */
 class BiliWebScanner(
     private val context: Context,
-    private val onResult: (BiliScanner.ScanResult?, Boolean, Boolean, String) -> Unit
+    private val onResult: (BiliScanner.ScanResult?, Boolean, Boolean, String, Long) -> Unit
 ) {
     private val handler = Handler(Looper.getMainLooper())
     private var web: WebView? = null
@@ -32,7 +32,7 @@ class BiliWebScanner(
     @SuppressLint("SetJavaScriptEnabled")
     fun refresh(uid: String) {
         if (!uid.matches(Regex("[0-9]{1,20}"))) {
-            onResult(null, false, false, "无效 UID")
+            onResult(null, false, false, "无效 UID", 0)
             return
         }
         // Never kill a browser navigation in the middle of loading.
@@ -64,10 +64,12 @@ class BiliWebScanner(
                         val code = errorResponse.statusCode
                         val host = request.url.host.orEmpty()
                         val path = request.url.path.orEmpty()
-                        if ((code == 412 || code == 403 || code == 429) &&
+                        val retryAfter = ApiRatePolicy.retryAfterSeconds(errorResponse.responseHeaders?.entries
+                            ?.firstOrNull { it.key.equals("Retry-After", ignoreCase = true) }?.value)
+                        if ((ApiRatePolicy.isRestricted(http = code) || (code >= 400 && retryAfter > 0)) &&
                             ((host == "api.bilibili.com" && path.contains("web-dynamic")) ||
                             (host == "space.bilibili.com" && request.isForMainFrame))) {
-                            done(activeId, null, false, true, "网页请求 HTTP $code")
+                            done(activeId, null, false, true, "网页请求 HTTP $code", retryAfter)
                         } else if (request.isForMainFrame && code >= 400) {
                             done(activeId, null, false, false, "网页主文档 HTTP $code")
                         }
@@ -140,10 +142,10 @@ class BiliWebScanner(
         }
     }
 
-    private fun done(id: Int, result: BiliScanner.ScanResult?, ready: Boolean, blocked: Boolean, info: String) {
+    private fun done(id: Int, result: BiliScanner.ScanResult?, ready: Boolean, blocked: Boolean, info: String, retryAfter: Long = 0) {
         if (id != activeId || finished) return
         finished = true
-        onResult(result, ready, blocked, info)
+        onResult(result, ready, blocked, info, retryAfter)
     }
 
     fun destroy() {

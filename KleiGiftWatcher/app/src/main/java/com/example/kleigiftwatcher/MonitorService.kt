@@ -19,11 +19,8 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Two channels: a real WebView page refresh and a fallback JSON API.
- * API requests are skipped when the rendered page was recently readable.
- * HTTP 412/-352 pauses BOTH channels with bounded increasing backoff.
- */
+/** WebView and JSON API have independent schedules, failure counts and cooldowns.
+ * Discovered gift URLs share only the persistent deduplication/claim queue. */
 class MonitorService : Service() {
     companion object {
         const val START = "com.example.kleigiftwatcher.START"
@@ -39,47 +36,41 @@ class MonitorService : Service() {
     private val main = Handler(Looper.getMainLooper())
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val alive = AtomicBoolean(false)
-    private val forceCheck = AtomicBoolean(false)
     private var nextApi: ScheduledFuture<*>? = null
     private var webTick: Runnable? = null
     private var webScanner: BiliWebScanner? = null
     private var redeemer: AutoRedeemer? = null
     private var cpuLock: PowerManager.WakeLock? = null
     private var claimLock: PowerManager.WakeLock? = null
-    @Volatile private var lastWebSuccess = 0L
     @Volatile private var lastApiStartedAt = 0L
-    @Volatile private var blockedUntil = 0L
-    private var blockedCount = 0
+    private val webBackoff = ChannelBackoff()
+    private val apiBackoff = ChannelBackoff()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         channels()
-        blockedUntil = SystemClock.elapsedRealtime() + Store.cooldownRemaining(this)
+        webBackoff.restore(SystemClock.elapsedRealtime(), Store.cooldownRemaining(this, MonitorChannel.WEB))
+        apiBackoff.restore(SystemClock.elapsedRealtime(), Store.cooldownRemaining(this, MonitorChannel.API))
         redeemer = AutoRedeemer(this, { url, result ->
             Store.status(this, "领取结果：$result")
             Store.event(this, "科雷领奖结果：${result.take(110)}")
             giftNotification(url, result)
             releaseClaimWake()
         }, { acquireClaimWake() })
-        webScanner = BiliWebScanner(this) { scan, ready, blocked, info ->
+        webScanner = BiliWebScanner(this) { scan, ready, blocked, info, retryAfter ->
             if (!alive.get()) return@BiliWebScanner
             if (blocked) {
-                lastWebSuccess = 0L
-                registerBlock(info)
+                registerBlock(MonitorChannel.WEB, info, retryAfter)
             } else if (ready && scan != null) {
-                lastWebSuccess = SystemClock.elapsedRealtime()
-                clearBlockCount()
+                webBackoff.success(SystemClock.elapsedRealtime())
                 Store.monitorResult(this, "网页", scan.latestId, scan.latestTime, scan.cardCount, scan.gifts.size)
                 val newCount = handleGifts(scan.gifts)
-                Store.status(this, "网页：$info，发现 ${scan.gifts.size} 个链接，新增 $newCount")
+                Store.status(this, "网页：$info，发现 ${scan.gifts.size} 个链接，新增 $newCount", MonitorChannel.WEB)
             } else {
-                lastWebSuccess = 0L
                 Store.monitorError(this, "网页", info)
-                Store.status(this, "网页：$info")
-                // Fallback is only useful when the web view fails or has no readable cards.
-                requestApiNow()
+                Store.status(this, "网页：$info", MonitorChannel.WEB)
             }
         }
     }
@@ -132,7 +123,6 @@ class MonitorService : Service() {
             scheduleWeb(0)
             scheduleApi(Store.apiSeconds(this).toLong())
         } else if (intent?.action == CHECK) {
-            forceCheck.set(true)
             scheduleWeb(0)
             requestApiNow()
         }
@@ -180,14 +170,16 @@ class MonitorService : Service() {
             val task = Runnable {
                 if (!alive.get()) return@Runnable
                 val now = SystemClock.elapsedRealtime()
-                if (now < blockedUntil) {
-                    val remaining = blockedUntil - now
-                    Store.status(this, "B站请求冷却中，约 ${(remaining + 999) / 1000} 秒后恢复")
+                val remaining = webBackoff.remainingMillis(now)
+                if (remaining > 0) {
+                    Store.status(this, "网页通道冷却中，约 ${(remaining + 999) / 1000} 秒后恢复", MonitorChannel.WEB)
                     scheduleWeb(remaining + 1000)
                     return@Runnable
                 }
-                Store.status(this, "网页正在检查 UID ${Store.uid(this)}")
-                webScanner?.refresh(Store.uid(this))
+                if (webScanner?.isBusy() == false) {
+                    Store.status(this, "网页正在检查 UID ${Store.uid(this)}", MonitorChannel.WEB)
+                    webScanner?.refresh(Store.uid(this))
+                }
                 scheduleWeb(Store.seconds(this).toLong() * 1000L)
             }
             webTick = task
@@ -202,7 +194,7 @@ class MonitorService : Service() {
     @Synchronized
     private fun scheduleApi(delaySeconds: Long) {
         if (!alive.get() || scheduler.isShutdown) return
-        // A failed web load must NEVER cause the API to run more often than its user-set interval.
+        // API timing depends only on its own interval, last start and cooldown.
         val minSpacing = Store.apiSeconds(this).toLong() * 1000L
         val now = SystemClock.elapsedRealtime()
         val untilAllowed = if (lastApiStartedAt > 0L) (lastApiStartedAt + minSpacing - now).coerceAtLeast(0L) else 0L
@@ -211,29 +203,24 @@ class MonitorService : Service() {
         nextApi = scheduler.schedule({
             try {
                 val now = SystemClock.elapsedRealtime()
-                if (now < blockedUntil) {
-                    Store.status(this, "B站限制访问，正在冷却")
+                if (apiBackoff.remainingMillis(now) > 0) {
+                    Store.status(this, "API 通道冷却中", MonitorChannel.API)
                 } else {
-                    val manual = forceCheck.getAndSet(false)
-                    val recentWeb = lastWebSuccess > 0L &&
-                        now - lastWebSuccess < (Store.seconds(this).toLong() * 3L + 15000L)
-                    if (manual || !recentWeb) {
-                        Store.status(this, "备用 API 正在检查 UID ${Store.uid(this)}")
-                        lastApiStartedAt = SystemClock.elapsedRealtime()
-                        val scan = BiliScanner(this).scan(Store.uid(this))
-                        clearBlockCount()
-                        Store.monitorResult(this, "备用 API", scan.latestId, scan.latestTime, scan.cardCount, scan.gifts.size)
-                        val newCount = handleGifts(scan.gifts)
-                        Store.status(this, "备用 API：发现 ${scan.gifts.size} 个链接，新增 $newCount")
-                    }
+                    Store.status(this, "API 正在检查 UID ${Store.uid(this)}", MonitorChannel.API)
+                    lastApiStartedAt = SystemClock.elapsedRealtime()
+                    val scan = BiliScanner(this).scan(Store.uid(this))
+                    apiBackoff.success(SystemClock.elapsedRealtime())
+                    Store.monitorResult(this, "API", scan.latestId, scan.latestTime, scan.cardCount, scan.gifts.size)
+                    val newCount = handleGifts(scan.gifts)
+                    Store.status(this, "API：发现 ${scan.gifts.size} 个链接，新增 $newCount", MonitorChannel.API)
                 }
             } catch (e: Exception) {
                 val reason = (e.message ?: e.javaClass.simpleName).take(150)
-                if (e is BiliAccessException) registerBlock(reason, true, e.retryAfterSeconds)
-                else { Store.monitorError(this, "备用 API", reason); Store.status(this, "备用 API 失败：$reason") }
+                if (e is BiliAccessException) registerBlock(MonitorChannel.API, reason, e.retryAfterSeconds)
+                else { Store.monitorError(this, "API", reason); Store.status(this, "API 失败：$reason", MonitorChannel.API) }
             } finally {
                 if (alive.get() && !scheduler.isShutdown) {
-                    val remaining = ((blockedUntil - SystemClock.elapsedRealtime()) / 1000L).coerceAtLeast(0L)
+                    val remaining = (apiBackoff.remainingMillis(SystemClock.elapsedRealtime()) / 1000L)
                     scheduleApi(maxOf(Store.apiSeconds(this).toLong(), remaining + if (remaining > 0L) 1L else 0L))
                 }
             }
@@ -262,26 +249,21 @@ class MonitorService : Service() {
         return newlyDiscovered.size
     }
 
-    @Synchronized
-    private fun registerBlock(reason: String, apiBlock: Boolean = false, retryAfter: Long = 0) {
-        blockedCount = (blockedCount + 1).coerceAtMost(3)
-        val cooldown = ApiRatePolicy.cooldownSeconds(blockedCount, retryAfter)
-        if (apiBlock) {
+    private fun registerBlock(channel: MonitorChannel, reason: String, retryAfter: Long = 0) {
+        val backoff = if (channel == MonitorChannel.WEB) webBackoff else apiBackoff
+        val remaining = backoff.block(SystemClock.elapsedRealtime(), retryAfter)
+        val cooldown = (remaining + 999) / 1000
+        val label = if (channel == MonitorChannel.WEB) "网页" else "API"
+        if (channel == MonitorChannel.API) {
             val interval = Store.increaseApiInterval(this)
             Store.event(this, "API 风控：基础检测间隔 +1 秒，当前 $interval 秒；冷却结束后生效")
             ClaimDiagnostics.event(this, "", "api_backoff", "intervalSeconds=$interval; reason=$reason; cooldownSeconds=$cooldown")
         }
-        blockedUntil = maxOf(blockedUntil, SystemClock.elapsedRealtime() + cooldown * 1000L)
-        Store.saveCooldown(this, (blockedUntil - SystemClock.elapsedRealtime()).coerceAtLeast(0))
-        Store.monitorError(this, "B站限制访问", "$reason；冷却 $cooldown 秒")
-        Store.status(this, "B站访问受限（$reason），暂停请求 $cooldown 秒")
-    }
-
-    @Synchronized
-    private fun clearBlockCount() {
-        if (SystemClock.elapsedRealtime() < blockedUntil) return // Ignore successes from requests already in flight.
-        blockedCount = 0
-        blockedUntil = 0L
+        if (channel == MonitorChannel.WEB)
+            ClaimDiagnostics.event(this, "", "web_backoff", "reason=$reason; cooldownSeconds=$cooldown")
+        Store.saveCooldown(this, channel, remaining)
+        Store.monitorError(this, "$label 通道限制访问", "$reason；本通道冷却 $cooldown 秒")
+        Store.status(this, "$label 访问受限（$reason），本通道暂停 $cooldown 秒", channel)
     }
 
     private fun channels() {
