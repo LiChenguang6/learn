@@ -45,6 +45,17 @@ class BiliScanner(private val context: Context) {
         return found.values.toList()
     }
 
+    /** Extracts Klei links from actual browser-rendered dynamic cards. */
+    fun scanPage(cards: List<Pair<String, String>>): List<Gift> {
+        val results = LinkedHashMap<String, Gift>()
+        for ((source, text) in cards.take(15)) {
+            val links = linkedSetOf<String>()
+            findLinks(text.take(60000), links)
+            for (link in links) results[link] = Gift(link, source)
+        }
+        return results.values.toList()
+    }
+
     private fun getJson(url: String): JSONObject {
         val connection = URL(url).openConnection() as HttpURLConnection
         try {
