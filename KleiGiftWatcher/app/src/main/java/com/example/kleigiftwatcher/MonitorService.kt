@@ -45,6 +45,7 @@ class MonitorService : Service() {
     private var webScanner: BiliWebScanner? = null
     private var redeemer: AutoRedeemer? = null
     private var cpuLock: PowerManager.WakeLock? = null
+    private var claimLock: PowerManager.WakeLock? = null
     @Volatile private var lastWebSuccess = 0L
     @Volatile private var lastApiStartedAt = 0L
     @Volatile private var blockedUntil = 0L
@@ -56,10 +57,11 @@ class MonitorService : Service() {
         super.onCreate()
         channels()
         redeemer = AutoRedeemer(this) { url, result ->
-            Store.update(this, url, result)
-            Store.status(this, result)
-            if (result.contains("需要") || result.contains("未核实") ||
-                result.contains("请手动") || result.contains("已领取")) giftNotification(url, result)
+            Store.status(this, "领取结果：$result")
+            Store.event(this, "科雷领奖结果：${result.take(110)}")
+            // All terminal outcomes need a visible notification, including failures.
+            giftNotification(url, result)
+            releaseClaimWake()
         }
         webScanner = BiliWebScanner(this) { scan, ready, blocked, info ->
             if (!alive.get()) return@BiliWebScanner
@@ -107,7 +109,10 @@ class MonitorService : Service() {
 
         if (intent?.action == RETRY) {
             intent.getStringExtra(LINK)?.let { raw ->
-                Store.verifiedUrl(raw)?.let { url -> main.post { redeemer?.enqueue(url) } }
+                Store.verifiedUrl(raw)?.let { url -> main.post {
+                    acquireClaimWake()
+                    redeemer?.enqueue(url)
+                } }
             }
         }
         val alreadyRunning = alive.getAndSet(true)
@@ -116,6 +121,11 @@ class MonitorService : Service() {
         applyWakeMode()
         if (!alreadyRunning) Store.event(this, "前台监控服务已启动（含系统恢复启动）")
         if (!alreadyRunning) {
+            if (Store.autoClaim(this)) {
+                val old = Store.pendingClaims(this)
+                if (old.isNotEmpty()) Store.event(this, "恢复 ${old.size} 条尚未提交领取的任务")
+                old.forEach { url -> main.post { acquireClaimWake(); redeemer?.enqueue(url) } }
+            }
             scheduleWeb(0)
             scheduleApi(Store.apiSeconds(this).toLong())
         } else if (intent?.action == CHECK) {
@@ -143,6 +153,21 @@ class MonitorService : Service() {
 
     private fun releaseWakeMode() {
         try { if (cpuLock?.isHeld == true) cpuLock?.release() } catch (_: Exception) {}
+    }
+
+    // A short timed CPU lock gives a just-discovered reward time to load when
+    // the user has not enabled the high-power persistent lock-screen mode.
+    private fun acquireClaimWake() {
+        try {
+            if (claimLock == null) claimLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KleiWatcher:Claim")
+                .apply { setReferenceCounted(false) }
+            claimLock?.acquire(70000L)
+        } catch (e: Exception) { Store.monitorError(this, "领奖保活", e.javaClass.simpleName) }
+    }
+
+    private fun releaseClaimWake() {
+        try { if (claimLock?.isHeld == true) claimLock?.release() } catch (_: Exception) {}
     }
 
     private fun scheduleWeb(delayMs: Long) {
@@ -218,7 +243,10 @@ class MonitorService : Service() {
             if (Store.addNew(this, gift.url, gift.source)) {
                 count++
                 giftNotification(gift.url, "发现新的科雷礼物链接")
-                if (Store.autoClaim(this)) main.post { redeemer?.enqueue(gift.url) }
+                if (Store.autoClaim(this)) main.post {
+                    acquireClaimWake()
+                    redeemer?.enqueue(gift.url)
+                }
                 else Store.update(this, gift.url, "已发现，等待手动领取")
             }
         }
@@ -273,6 +301,8 @@ class MonitorService : Service() {
         webScanner?.destroy()
         webScanner = null
         releaseWakeMode()
+        releaseClaimWake()
+        claimLock = null
         cpuLock = null
         main.removeCallbacksAndMessages(null)
         redeemer?.destroy()

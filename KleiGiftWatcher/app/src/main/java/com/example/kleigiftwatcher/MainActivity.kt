@@ -229,8 +229,11 @@ class MainActivity : Activity() {
             container.addView(label("● $status", 14f, Color.rgb(27, 85, 137)))
             container.addView(label(url, 12f, Color.DKGRAY))
             container.addView(label("来自：${row.optString("source")}", 11f, Color.GRAY))
-            row(container, "查看 / 浏览器补领" to { openBrowser("klei", url) }, "重新尝试" to {
-                if (Store.verifiedUrl(url) != null) {
+            row(container, "App 内打开 / 核对" to { openBrowser("klei", url) }, "重试未提交领取" to {
+                if (Store.claimState(this, url) in listOf("clicked", "clicking", "confirmed", "uncertain")) {
+                    toast("可能已经提交过领取，请先在 App 内人工核对，避免重复提交")
+                    openBrowser("klei", url)
+                } else if (Store.verifiedUrl(url) != null) {
                     try {
                         startForegroundService(Intent(this, MonitorService::class.java)
                             .setAction(MonitorService.RETRY).putExtra(MonitorService.LINK, url))
