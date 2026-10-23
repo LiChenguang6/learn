@@ -12,8 +12,8 @@ android {
         minSdk = 26
         // Personal sideload build; Android 15+ foreground-service rules still vary by OS/vendor.
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.3.2"
+        versionCode = 6
+        versionName = "0.4.0"
     }
 
     compileOptions {
@@ -23,7 +23,3 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
-// Chrome Custom Tabs use the user's installed browser rather than bundling Chromium.
-dependencies {
-    implementation("androidx.browser:browser:1.9.0")
-}

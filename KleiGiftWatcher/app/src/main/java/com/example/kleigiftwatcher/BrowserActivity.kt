@@ -13,7 +13,6 @@ import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceResponse
-import androidx.browser.customtabs.CustomTabsIntent
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -67,12 +66,16 @@ class BrowserActivity : Activity() {
         root.addView(nav)
         if (site == "klei") {
             val chrome = Button(this).apply {
-                text = "使用 Chrome 打开科雷页面（人工补领）"
-                setOnClickListener { openInChrome() }
+                text = "在 App 内重新加载领奖页面"
+                setOnClickListener {
+                    val target = Store.verifiedUrl(intendedKleiUrl) ?: "https://accounts.klei.com/"
+                    web.stopLoading()
+                    web.loadUrl(target)
+                }
             }
             root.addView(chrome)
             val hint = TextView(this).apply {
-                text = "Chrome 与 App WebView 登录状态不共享。使用 Chrome 手动领取时可能需要重新登录；不会因此让后台自动领取使用 Chrome Cookie。"
+                text = "全部在 App 内进行：请在这里登录科雷并保持会话。登录过期时需要按平台要求重新认证；不会把密码或 Cookie 上传到服务器。"
                 textSize = 12f
                 setTextColor(Color.DKGRAY)
             }
@@ -92,6 +95,7 @@ class BrowserActivity : Activity() {
         web.settings.setSupportMultipleWindows(false)
         if (debugging) web.settings.userAgentString = BiliWebScanner.DESKTOP_UA
         CookieManager.getInstance().setAcceptCookie(true)
+        web.settings.databaseEnabled = true
         CookieManager.getInstance().setAcceptThirdPartyCookies(web, true)
         web.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -131,23 +135,6 @@ class BrowserActivity : Activity() {
         web.loadUrl(url)
     }
 
-    private fun openInChrome() {
-        // Only allow the official Klei origin or a previously verified creator link.
-        val target = Store.verifiedUrl(intendedKleiUrl) ?: "https://accounts.klei.com/"
-        val uri = Uri.parse(target)
-        try {
-            val tab = CustomTabsIntent.Builder().setShowTitle(true).build()
-            tab.intent.setPackage("com.android.chrome")
-            tab.launchUrl(this, uri)
-        } catch (_: Exception) {
-            try { CustomTabsIntent.Builder().setShowTitle(true).build().launchUrl(this, uri) }
-            catch (_: Exception) {
-                try { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
-                catch (e: Exception) { status.text = "无法打开浏览器：${e.message}" }
-            }
-        }
-    }
-
     private fun inspectPage() {
         if (!debugging || !::web.isInitialized) return
         web.evaluateJavascript(BiliWebScanner.EXTRACT_JS) { encoded ->
@@ -179,6 +166,7 @@ class BrowserActivity : Activity() {
     }
 
     override fun onDestroy() {
+        CookieManager.getInstance().flush()
         if (::web.isInitialized) {
             (web.parent as? ViewGroup)?.removeView(web)
             web.destroy()
