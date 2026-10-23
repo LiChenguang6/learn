@@ -30,6 +30,7 @@ jobs:
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
       - name: Assemble debug APK
         run: gradle --no-daemon -p KleiGiftWatcher :app:assembleDebug
+      # Verification run: confirm repository signing secrets produce a stable-signed APK.
       # Keep the private key OUT of the public repository and CI artifacts.
       # If these four repository secrets are configured, sign with the stable key.
       - name: Sign with stable private key (only when secrets are configured)
